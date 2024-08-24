@@ -85,7 +85,7 @@ DSP_SRCS-yes += vpx_convolve.c
 DSP_SRCS-yes += vpx_convolve.h
 DSP_SRCS-yes += vpx_filter.h
 
-#NEMO
+#PALANTIR
 DSP_SRCS-yes += vpx_bilinear.c
 DSP_SRCS-yes += vpx_bilinear.h
 DSP_SRCS-yes += vpx_convert.c

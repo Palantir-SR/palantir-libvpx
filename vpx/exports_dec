@@ -6,8 +6,9 @@ text vpx_codec_peek_stream_info
 text vpx_codec_register_put_frame_cb
 text vpx_codec_register_put_slice_cb
 text vpx_codec_set_frame_buffer_functions
-text init_nemo_cfg
-text vpx_load_nemo_cfg
-text vpx_load_nemo_dnn
-text vpx_load_nemo_cache_profile
-text remove_nemo_cfg
+text init_palantir_cfg
+text vpx_load_palantir_cfg
+text vpx_load_palantir_dnn
+text vpx_load_palantir_cache_profile
+text vpx_init_palantir_dependeny_graph
+text remove_palantir_cfg

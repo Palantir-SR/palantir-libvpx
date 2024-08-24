@@ -19,7 +19,7 @@ struct vpx_codec_alg_priv {
   vpx_codec_priv_t base;
   vpx_codec_dec_cfg_t cfg;
   vp9_stream_info_t si;
-  nemo_cfg_t *nemo_cfg; // NEMO: New variable
+  palantir_cfg_t *palantir_cfg; // PALANTIR: New variable
   VP9Decoder *pbi;
   void *user_priv;
   int postproc_cfg_set;

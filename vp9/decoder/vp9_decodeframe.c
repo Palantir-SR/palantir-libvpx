@@ -42,18 +42,25 @@
 #include "vp9/decoder/vp9_decodemv.h"
 #include "vp9/decoder/vp9_decoder.h"
 #include "vp9/decoder/vp9_dsubexp.h"
+#include "vpx/vpx_palantir.h"
 
 #define MAX_VP9_HEADER_SIZE 80
 
 #include <vpx_util/vpx_write_yuv_frame.h>
 #include <vpx_dsp/psnr.h>
-#include <vpx/vpx_nemo.h>
+#include <vpx/vpx_palantir.h>
+#include <vpx/vpx_decoder.h>
+#include <tools_common.h>
+
+#if CONFIG_SNPE
 #include <vpx/snpe/main.hpp>
+#endif
 
 #define DEBUG_LATENCY 1
 #define TURN_OFF_MV 0
 #define TURN_OFF_RESIDUAL 0
 #define BILLION  1E9
+#define LOG_MAX 1000
 
 #ifdef __ANDROID_API__
 
@@ -294,7 +301,7 @@ static void inverse_transform_block_inter(MACROBLOCKD *xd, int plane,
     }
 }
 
-/* NEMO: decode residual and copy it into residual buffer */
+/* PALANTIR: decode residual and copy it into residual buffer */
 static void inverse_transform_block_inter_copy(MACROBLOCKD *xd, int plane,
                                                const TX_SIZE tx_size, uint8_t *dst,
                                                int stride, int16_t *residual, int res_stride,
@@ -371,6 +378,40 @@ static void inverse_transform_block_inter_copy(MACROBLOCKD *xd, int plane,
         else
             memset(dqcoeff, 0, (16 << (tx_size << 1)) * sizeof(dqcoeff[0]));
     }
+}
+
+static void update_palantir_dependency_graph_block_novelty(palantir_cfg_t *palantir_cfg, const TX_SIZE tx_size, tran_low_t *dqcoeff, int mi_row, int mi_col, int row, int col, int subsampling_y, int subsampling_x) {
+    palantir_dependency_graph_t *palantir_dependency_graph = palantir_cfg->dependency_graph;
+
+    int size = 1 << (tx_size + 2);
+    float weighted_coeffs = 0;
+    for (int x = 0; x < size; x ++) {
+        for (int y = 0; y < size; y ++) {
+            if (x==0 && y==0){
+                continue;
+            }
+            float diff = (float)(dqcoeff[y*size + x] * (y+1) * (x+1)) / (float)(size*size);
+            weighted_coeffs += diff>0?diff:-diff;
+        }
+    }
+
+    float *num_pixels_per_patch = vpx_calloc(palantir_cfg->num_patches_per_row*palantir_cfg->num_patches_per_column, sizeof(float));
+    for (int y = mi_row*MI_SIZE + row << 2; y < mi_row*MI_SIZE + (row + (1<<tx_size)) << 2; y ++) {
+        for (int x = mi_col*MI_SIZE + col<<2; x < mi_col*MI_SIZE + (col + (1<<tx_size)) << 2; x ++) {
+            int row_idx = y / palantir_cfg->patch_height;
+            int col_idx = x / palantir_cfg->patch_width;
+            if (row_idx >= palantir_cfg->num_patches_per_column || col_idx >= palantir_cfg->num_patches_per_row) {
+                continue;
+            }
+            num_pixels_per_patch[row_idx*palantir_cfg->num_patches_per_row+col_idx] ++;
+        }
+    }
+    for (int row_idx = 0; row_idx < palantir_cfg->num_patches_per_column; row_idx ++) {
+        for (int col_idx = 0; col_idx < palantir_cfg->num_patches_per_row; col_idx ++) {
+            num_pixels_per_patch[row_idx*palantir_cfg->num_patches_per_row+col_idx] /= size*size;
+            palantir_dependency_graph->block_residual[row_idx*palantir_cfg->num_patches_per_row+col_idx] += num_pixels_per_patch[row_idx*palantir_cfg->num_patches_per_row+col_idx] * weighted_coeffs;
+        }
+    };
 }
 
 static void inverse_transform_block_intra(MACROBLOCKD *xd, int plane,
@@ -453,10 +494,7 @@ static void inverse_transform_block_intra(MACROBLOCKD *xd, int plane,
     }
 }
 
-static void predict_and_reconstruct_intra_block(TileWorkerData *twd,
-                                                MODE_INFO *const mi, int plane,
-                                                int row, int col,
-                                                TX_SIZE tx_size) {
+static void predict_and_reconstruct_intra_block(palantir_cfg_t *palantir_cfg, TileWorkerData *twd, MODE_INFO *const mi, int plane, int row, int col, int mi_row, int mi_col, int subsampling_y, int subsampling_x, TX_SIZE tx_size, VP9_COMMON *cm) {
     MACROBLOCKD *const xd = &twd->xd;
     struct macroblockd_plane *const pd = &xd->plane[plane];
     PREDICTION_MODE mode = (plane == 0) ? mi->mode : mi->uv_mode;
@@ -486,20 +524,50 @@ static void predict_and_reconstruct_intra_block(TileWorkerData *twd,
     }
 }
 
+static int is_current_block_within_some_anchor_block(VP9Decoder *const pbi, int col_offset, int row_offset, int block_width, int block_height) {
+    VP9_COMMON *const cm = &pbi->common;
+    palantir_cfg_t *const palantir_cfg = cm->palantir_cfg;
+    if(row_offset+block_height > palantir_cfg->num_patches_per_column * palantir_cfg->patch_height ) {
+        return 0;
+    }
+    if(col_offset+block_width > palantir_cfg->num_patches_per_row * palantir_cfg->patch_width ) {
+        return 0;
+    }
+    for(int row_idx = row_offset/palantir_cfg->patch_height; row_idx <= (row_offset+block_height-1)/palantir_cfg->patch_height; row_idx ++) {
+        for(int col_idx = col_offset/palantir_cfg->patch_width; col_idx <= (col_offset+block_width-1)/palantir_cfg->patch_width; col_idx ++) {
+            int index = col_idx * palantir_cfg->num_patches_per_column + row_idx;
+            if (palantir_cfg->cache_profile->block_apply_dnn[index]==0) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
 
 static int reconstruct_inter_block(TileWorkerData *twd, MODE_INFO *const mi,
-                                   int plane, int row, int col,
-                                   TX_SIZE tx_size, VP9_COMMON *cm) {
+                                   int plane, int mi_row, int mi_col, int row, int col,
+                                   TX_SIZE tx_size, VP9_COMMON *cm, VP9Decoder *pbi, int within_anchor_block) {
     MACROBLOCKD *const xd = &twd->xd;
     struct macroblockd_plane *const pd = &xd->plane[plane];
     const scan_order *sc = &vp9_default_scan_orders[tx_size];
     const int eob = vp9_decode_block_tokens(twd, plane, sc, col, row, tx_size,
                                             mi->segment_id);
 
-    /* NEMO: copy residual to res.buf to apply bilinear interpolation */
+    /* PALANTIR: copy residual to res.buf to apply bilinear interpolation */
     if (eob > 0) {
-        if (cm->nemo_cfg->decode_mode == DECODE_CACHE) {
-            if (!cm->apply_dnn) {
+        if (cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
+            if (!within_anchor_block) {
+                inverse_transform_block_inter_copy(
+                        xd, plane, tx_size, &pd->dst.buf[4 * row * pd->dst.stride + 4 * col],
+                        pd->dst.stride, &pd->res.buf[4 * row * pd->res.stride + 4 * col],
+                        pd->res.stride, eob);
+            } else {
+                inverse_transform_block_inter(
+                        xd, plane, tx_size, &pd->dst.buf[4 * row * pd->dst.stride + 4 * col],
+                        pd->dst.stride, eob);
+            }
+        } else if (cm->palantir_cfg->decode_mode == DECODE_CACHE) {
+            if (!cm->frame_apply_dnn) {
                 inverse_transform_block_inter_copy(
                         xd, plane, tx_size, &pd->dst.buf[4 * row * pd->dst.stride + 4 * col],
                         pd->dst.stride, &pd->res.buf[4 * row * pd->res.stride + 4 * col],
@@ -642,7 +710,7 @@ static void extend_and_predict(const uint8_t *buf_ptr1, int pre_buf_stride,
 
 #endif  // CONFIG_VP9_HIGHBITDEPTH
 
-/* NEMO: process a up-scaled inter-block */
+/* PALANTIR: process a up-scaled inter-block */
 static void extend_and_resize_and_predict(const uint8_t *buf_ptr1, int pre_buf_stride,
                                           int x0, int y0, int b_w, int b_h,
                                           int frame_width, int frame_height,
@@ -741,8 +809,7 @@ static void extend_and_resize_and_predict(const uint8_t *buf_ptr1, int pre_buf_s
     }
 }
 
-static void dec_build_inter_predictors(
-        MACROBLOCKD *xd, int plane, int bw, int bh, int x, int y, int w, int h,
+static void dec_build_inter_predictors(MACROBLOCKD *xd, int plane, int bw, int bh, int x, int y, int w, int h,
         int mi_x, int mi_y, const InterpKernel *kernel,
         const struct scale_factors *sf, struct buf_2d *pre_buf,
         struct buf_2d *dst_buf, const MV *mv, RefCntBuffer *ref_frame_buf,
@@ -830,6 +897,7 @@ static void dec_build_inter_predictors(
     x0_16 += scaled_mv.col;
     y0_16 += scaled_mv.row;
 
+    char log[CHAR_MAX] = {0};
     // Get reference block pointer.
     buf_ptr = ref_frame + y0 * pre_buf->stride + x0;
     buf_stride = pre_buf->stride;
@@ -890,24 +958,25 @@ static void dec_build_inter_predictors(
 #endif  // CONFIG_VP9_HIGHBITDEPTH
 }
 
-static void dec_build_sr_inter_predictors(
-        MACROBLOCKD *xd, int plane, int bw, int bh, int x, int y, int w, int h,
-        int mi_x, int mi_y, const InterpKernel *kernel,
-        const struct scale_factors *sf, struct buf_2d *pre_buf,
-        struct buf_2d *dst_buf, const MV *mv, RefCntBuffer *ref_frame_buf,
-        int is_scaled, int ref, int is_sr) {
+static void dec_build_sr_inter_predictors(VP9_COMMON *cm, MACROBLOCKD *xd, int plane, int bw, int bh, int x, int y, int w, int h, int mi_x, int mi_y, const InterpKernel *kernel, const struct scale_factors *sf, struct buf_2d *pre_buf, struct buf_2d *dst_buf, const MV *mv, RefCntBuffer *ref_frame_buf, int is_scaled, int ref, int is_sr, int finegrained_metadata_ref_frame_index, int is_compound, int x_subsampling, int y_subsampling) {
+    if (cm->palantir_cfg->save_finegrained_metadata || cm->palantir_cfg->save_super_finegrained_metadata) {
+        assert(is_scaled==0);
+    }
+
+    int patch_width = cm->palantir_cfg->patch_width, patch_height = cm->palantir_cfg->patch_height, num_patches_per_row = cm->palantir_cfg->num_patches_per_row, num_patches_per_column = cm->palantir_cfg->num_patches_per_column;
+
     struct macroblockd_plane *const pd = &xd->plane[plane];
 
-    int scale = sf->scale >> REF_SCALE_SHIFT; // NEMO: setup
+    int scale = sf->scale >> REF_SCALE_SHIFT; // PALANTIR: setup
     uint8_t *const dst = is_sr ? dst_buf->buf + dst_buf->stride * scale * y + scale * x :
-                         dst_buf->buf + dst_buf->stride * y + x; //NEMO: setup
+                         dst_buf->buf + dst_buf->stride * y + x; //PALANTIR: setup
     MV32 scaled_mv;
     int xs, ys, x0, y0, x0_16, y0_16, frame_width, frame_height, buf_stride,
             subpel_x, subpel_y;
     uint8_t *ref_frame, *buf_ptr;
     int w_offset, h_offset;
 
-    /* NEMO: setup */
+    /* PALANTIR: setup */
     if (is_sr) {
         if (plane == 0) {
             frame_width = ref_frame_buf->sr_buf.y_crop_width;
@@ -968,7 +1037,7 @@ static void dec_build_sr_inter_predictors(
         scaled_mv.row = 0;
         scaled_mv.col = 0;
 #else
-        scaled_mv = vp9_scale_nemo_mv(&mv_q4, mi_x + x, mi_y + y, sf); //NEMO: up-scale a motion vector
+        scaled_mv = vp9_scale_palantir_mv(&mv_q4, mi_x + x, mi_y + y, sf); //PALANTIR: up-scale a motion vector
 #endif
         xs = sf->x_step_q4;
         ys = sf->y_step_q4;
@@ -1001,7 +1070,32 @@ static void dec_build_sr_inter_predictors(
     buf_ptr = ref_frame + y0 * pre_buf->stride + x0;
     buf_stride = pre_buf->stride;
 
-    /* NEMO: setup */
+    if (!is_sr) {
+        // save finegrained metadata
+        if(cm->palantir_cfg->save_finegrained_metadata && plane==0){
+            palantir_dependency_graph_t *palantir_dependency_graph = cm->palantir_cfg->dependency_graph;
+            for (int row_offset = 0; row_offset < h; row_offset ++) {
+                for (int col_offset = 0; col_offset < w; col_offset ++) {
+                    if (mi_y+y+row_offset < 0 || mi_y+y+row_offset >= patch_height*num_patches_per_column || mi_x+x+col_offset < 0 || mi_x+x+col_offset >= patch_width*num_patches_per_row || y0+row_offset < 0 || y0+row_offset >= patch_height*num_patches_per_column || x0+col_offset < 0 || x0+col_offset >= patch_width*num_patches_per_row) {
+                        continue;
+                    }
+                    int cur_row_idx = (mi_y+y+row_offset)/patch_height, cur_col_idx = (mi_x+x+col_offset)/patch_width, ref_row_idx = (y0+row_offset)/patch_height, ref_col_idx = (x0+col_offset)/patch_width;
+                    if (is_compound) {                    palantir_dependency_graph->block_dependency_weight[finegrained_metadata_ref_frame_index][(cur_row_idx*num_patches_per_row+cur_col_idx)*num_patches_per_row*num_patches_per_column+(ref_row_idx*num_patches_per_row+ref_col_idx)] += 0.5;
+                    } else {
+                        palantir_dependency_graph->block_dependency_weight[finegrained_metadata_ref_frame_index][(cur_row_idx*num_patches_per_row+cur_col_idx)*num_patches_per_row*num_patches_per_column+(ref_row_idx*num_patches_per_row+ref_col_idx)] += 1;
+                    }
+                }
+            }
+        }
+
+        if(cm->palantir_cfg->save_super_finegrained_metadata){
+            char log[LOG_MAX] = {0};
+            sprintf(log, "[INTER]%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", plane, (mi_x >> x_subsampling) +x, (mi_y >> y_subsampling) +y, w, h, is_compound, finegrained_metadata_ref_frame_index, x0, y0);
+            fputs(log, cm->super_finegrained_metadata_log);
+        }
+    }
+
+    /* PALANTIR: setup */
     if (is_sr) {
         w = w * scale;
         h = h * scale;
@@ -1038,7 +1132,7 @@ static void dec_build_sr_inter_predictors(
             const int b_h = y1 - y0 + 1;
             const int border_offset = y_pad * 3 * b_w + x_pad * 3;
 
-            /* NEMO: transfer super-resoluted pixels */
+            /* PALANTIR: transfer super-resoluted pixels */
             if (is_sr) {
                 extend_and_resize_and_predict(buf_ptr1, buf_stride, x0, y0, b_w, b_h, frame_width,
                                               frame_height, border_offset, dst, dst_buf->stride,
@@ -1071,7 +1165,7 @@ static void dec_build_sr_inter_predictors(
     }
 #else
 
-    /* NEMO: transfer super-resoluted pixels */
+    /* PALANTIR: transfer super-resoluted pixels */
     if (is_sr) {
         int w_proc_size;
         int h_proc_size;
@@ -1182,7 +1276,8 @@ static void dec_build_inter_predictors_sb(VP9Decoder *const pbi,
         const int idx = ref_buf->idx;
         BufferPool *const pool = pbi->common.buffer_pool;
         RefCntBuffer *const ref_frame_buf = &pool->frame_bufs[idx];
-
+        char log[CHAR_MAX] = {0};
+        
         if (!vp9_is_valid_scale(sf))
             vpx_internal_error(xd->error_info, VPX_CODEC_UNSUP_BITSTREAM,
                                "Reference frame has invalid dimensions");
@@ -1205,10 +1300,7 @@ static void dec_build_inter_predictors_sb(VP9Decoder *const pbi,
                 for (y = 0; y < num_4x4_h; ++y) {
                     for (x = 0; x < num_4x4_w; ++x) {
                         const MV mv = average_split_mvs(pd, mi, ref, i++);
-                        dec_build_inter_predictors(xd, plane, n4w_x4, n4h_x4, 4 * x, 4 * y,
-                                                   4, 4, mi_x, mi_y, kernel, sf, pre_buf,
-                                                   dst_buf, &mv, ref_frame_buf, is_scaled,
-                                                   ref);
+                        dec_build_inter_predictors(xd, plane, n4w_x4, n4h_x4, 4 * x, 4 * y, 4, 4, mi_x, mi_y, kernel, sf, pre_buf, dst_buf, &mv, ref_frame_buf, is_scaled, ref);
                     }
                 }
             }
@@ -1222,18 +1314,16 @@ static void dec_build_inter_predictors_sb(VP9Decoder *const pbi,
                 const int n4w_x4 = 4 * num_4x4_w;
                 const int n4h_x4 = 4 * num_4x4_h;
                 struct buf_2d *const pre_buf = &pd->pre[ref];
-                dec_build_inter_predictors(xd, plane, n4w_x4, n4h_x4, 0, 0, n4w_x4,
-                                           n4h_x4, mi_x, mi_y, kernel, sf, pre_buf,
-                                           dst_buf, &mv, ref_frame_buf, is_scaled, ref);
+                dec_build_inter_predictors(xd, plane, n4w_x4, n4h_x4, 0, 0, n4w_x4, n4h_x4, mi_x, mi_y, kernel, sf, pre_buf, dst_buf, &mv, ref_frame_buf, is_scaled, ref);
             }
         }
     }
 }
 
-/* NEMO: is_sr == true, then decode and transfer super-resoluted frames, is_sr == false, then decode */
-static void dec_build_nemo_inter_predictors_sb(VP9Decoder *const pbi,
-                                               MACROBLOCKD *xd, int mi_row,
-                                               int mi_col, int is_sr) {
+/* PALANTIR: is_sr == true, then decode and transfer super-resoluted frames, is_sr == false, then decode */
+static void dec_build_palantir_inter_predictors_sb(VP9Decoder *const pbi, MACROBLOCKD *xd, int mi_row, int mi_col, int is_sr, int within_anchor_block) {
+    const int frame_level_ref_frame_video_frame_indices[REFS_PER_FRAME] = {pbi->common.metadata.reference_frames[0].video_frame_index, pbi->common.metadata.reference_frames[1].video_frame_index, pbi->common.metadata.reference_frames[2].video_frame_index};
+    const int frame_level_ref_frame_super_frame_indices[REFS_PER_FRAME] = {pbi->common.metadata.reference_frames[0].super_frame_index, pbi->common.metadata.reference_frames[1].super_frame_index, pbi->common.metadata.reference_frames[2].super_frame_index};
     int plane;
     const int mi_x = mi_col * MI_SIZE;
     const int mi_y = mi_row * MI_SIZE;
@@ -1249,12 +1339,24 @@ static void dec_build_nemo_inter_predictors_sb(VP9Decoder *const pbi,
         RefBuffer *ref_buf = &pbi->common.frame_refs[frame - LAST_FRAME];
         const int idx = ref_buf->idx;
         const struct scale_factors *sf;
-        if (is_sr) sf = &ref_buf->sf_sr; //NEMO: setup
-        else sf = &ref_buf->sf; //NEMO: setup
+        if (is_sr) sf = &ref_buf->sf_sr; //PALANTIR: setup
+        else sf = &ref_buf->sf; //PALANTIR: setup
         BufferPool *const pool = pbi->common.buffer_pool;
         RefCntBuffer *const ref_frame_buf = &pool->frame_bufs[idx];
 
-        if (!vp9_is_valid_scale(sf) && pbi->common.nemo_cfg->decode_mode != DECODE_CACHE)
+        int finegrained_metadata_ref_frame_index = -1;
+        for (int ref_frame_idx = 0; ref_frame_idx < REFS_PER_FRAME; ref_frame_idx ++) {
+            if (ref_frame_buf->current_video_frame == frame_level_ref_frame_video_frame_indices[ref_frame_idx] && ref_frame_buf->current_super_frame == frame_level_ref_frame_super_frame_indices[ref_frame_idx]) {
+                finegrained_metadata_ref_frame_index = ref_frame_idx;
+                break;
+            }
+        }
+        if (finegrained_metadata_ref_frame_index == -1) {
+            fprintf(stderr, "Error determining finegrained_metadata_ref_frame_index\n");
+            exit(1);
+        }
+
+        if (!vp9_is_valid_scale(sf) && pbi->common.palantir_cfg->decode_mode != DECODE_CACHE && pbi->common.palantir_cfg->decode_mode != DECODE_BLOCK_CACHE)
             vpx_internal_error(xd->error_info, VPX_CODEC_UNSUP_BITSTREAM,
                                "Reference frame has invalid dimensions");
 
@@ -1267,7 +1369,7 @@ static void dec_build_nemo_inter_predictors_sb(VP9Decoder *const pbi,
             for (plane = 0; plane < MAX_MB_PLANE; ++plane) {
                 struct macroblockd_plane *const pd = &xd->plane[plane];
                 struct buf_2d *dst_buf;
-                /* NEMO: setup */
+                /* PALANTIR: setup */
                 if (is_sr) {
                     dst_buf = &pd->sr;
                 } else {
@@ -1279,14 +1381,13 @@ static void dec_build_nemo_inter_predictors_sb(VP9Decoder *const pbi,
                 const int n4h_x4 = 4 * num_4x4_h;
                 struct buf_2d *const pre_buf = &pd->pre[ref];
                 int i = 0, x, y;
-                /* NEMO: decode an inter-blocks and/or transfer super-resoluted pixels */
+                /* PALANTIR: decode an inter-blocks and/or transfer super-resoluted pixels */
                 for (y = 0; y < num_4x4_h; ++y) {
                     for (x = 0; x < num_4x4_w; ++x) {
                         const MV mv = average_split_mvs(pd, mi, ref, i++);
-                        dec_build_sr_inter_predictors(xd, plane, n4w_x4, n4h_x4, 4 * x, 4 * y,
-                                                      4, 4, mi_x, mi_y, kernel, sf, pre_buf,
-                                                      dst_buf, &mv, ref_frame_buf, is_scaled,
-                                                      ref, is_sr);
+                            if (!is_sr || pbi->common.palantir_cfg->decode_mode != DECODE_BLOCK_CACHE || !within_anchor_block) {
+                            dec_build_sr_inter_predictors(&pbi->common, xd, plane, n4w_x4, n4h_x4, 4 * x, 4 * y, 4, 4, mi_x, mi_y, kernel, sf, pre_buf, dst_buf, &mv, ref_frame_buf, is_scaled, ref, is_sr, finegrained_metadata_ref_frame_index, is_compound, pd->subsampling_x, pd->subsampling_y);
+                            }
                     }
                 }
             }
@@ -1295,7 +1396,7 @@ static void dec_build_nemo_inter_predictors_sb(VP9Decoder *const pbi,
             for (plane = 0; plane < MAX_MB_PLANE; ++plane) {
                 struct macroblockd_plane *const pd = &xd->plane[plane];
                 struct buf_2d *dst_buf;
-                /* NEMO: setup */
+                /* PALANTIR: setup */
                 if (is_sr) {
                     dst_buf = &pd->sr;
                 } else {
@@ -1306,10 +1407,10 @@ static void dec_build_nemo_inter_predictors_sb(VP9Decoder *const pbi,
                 const int n4w_x4 = 4 * num_4x4_w;
                 const int n4h_x4 = 4 * num_4x4_h;
                 struct buf_2d *const pre_buf = &pd->pre[ref];
-                /* NEMO: decode an inter-blocks and/or transfer super-resoluted pixels */
-                dec_build_sr_inter_predictors(xd, plane, n4w_x4, n4h_x4, 0, 0, n4w_x4,
-                                              n4h_x4, mi_x, mi_y, kernel, sf, pre_buf,
-                                              dst_buf, &mv, ref_frame_buf, is_scaled, ref, is_sr);
+                if (!is_sr || pbi->common.palantir_cfg->decode_mode != DECODE_BLOCK_CACHE || !within_anchor_block) {
+                    /* PALANTIR: decode an inter-blocks and/or transfer super-resoluted pixels */
+                        dec_build_sr_inter_predictors(&pbi->common, xd, plane, n4w_x4, n4h_x4, 0, 0, n4w_x4, n4h_x4, mi_x, mi_y, kernel, sf, pre_buf, dst_buf, &mv, ref_frame_buf, is_scaled, ref, is_sr, finegrained_metadata_ref_frame_index, is_compound, pd->subsampling_x, pd->subsampling_y);
+                }
             }
         }
     }
@@ -1376,7 +1477,7 @@ static void decode_block(TileWorkerData *twd, VP9Decoder *const pbi, int mi_row,
     const int y_mis = VPXMIN(bh, cm->mi_rows - mi_row);
     vpx_reader *r = &twd->bit_reader;
     MACROBLOCKD *const xd = &twd->xd;
-    nemo_worker_data_t *mwd = twd->nemo_worker_data;
+    palantir_worker_data_t *mwd = twd->palantir_worker_data;
 #if DEBUG_LATENCY
     struct timespec start_time, finish_time;
     double diff;
@@ -1400,12 +1501,13 @@ static void decode_block(TileWorkerData *twd, VP9Decoder *const pbi, int mi_row,
         dec_reset_skip_context(xd);
     }
 
-    if (!is_inter_block(mi)) {
+    if (!is_inter_block(mi)) { // Case 1: intra block
 #if DEBUG_LATENCY
         clock_gettime(CLOCK_MONOTONIC, &start_time);
 #endif
         mwd->metadata.num_intrablocks++;
         int plane;
+        int num_planes_within_anchor = 0;
         for (plane = 0; plane < MAX_MB_PLANE; ++plane) {
             const struct macroblockd_plane *const pd = &xd->plane[plane];
             const TX_SIZE tx_size = plane ? get_uv_tx_size(mi, pd) : mi->tx_size;
@@ -1421,24 +1523,37 @@ static void decode_block(TileWorkerData *twd, VP9Decoder *const pbi, int mi_row,
                     num_4x4_h + (xd->mb_to_bottom_edge >= 0
                                  ? 0
                                  : xd->mb_to_bottom_edge >> (5 + pd->subsampling_y));
-
+        
             xd->max_blocks_wide = xd->mb_to_right_edge >= 0 ? 0
                                                             : max_blocks_wide;
             xd->max_blocks_high = xd->mb_to_bottom_edge >= 0 ? 0 : max_blocks_high;
 
             for (row = 0; row < max_blocks_high; row += step)
                 for (col = 0; col < max_blocks_wide; col += step)
-                    predict_and_reconstruct_intra_block(twd, mi, plane, row, col,
-                                                        tx_size);
-            /* NEMO: add an intra-block to intra_block_list for applying bilinear_interpolation */
-            if (!cm->apply_dnn && cm->nemo_cfg->decode_mode == DECODE_CACHE) {
-                if (plane == 0)
-                    create_nemo_interp_block(mwd->intra_block_list, mi_col, mi_row, max_blocks_wide,
+                    predict_and_reconstruct_intra_block(pbi->common.palantir_cfg, twd, mi, plane, row, col, mi_row, mi_col, pd->subsampling_y, pd->subsampling_x, tx_size, &pbi->common);
+            /* PALANTIR: add an intra-block to intra_block_list for applying bilinear_interpolation */
+            if (cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE || (!cm->frame_apply_dnn && cm->palantir_cfg->decode_mode == DECODE_CACHE))
+            {
+                if (plane == 0) {
+                // PALANTIR: create palantir interp block
+                    create_palantir_interp_block(mwd->intra_block_list, mi_col, mi_row, max_blocks_wide,
                                              max_blocks_high);
-                else
-                    set_nemo_interp_block(mwd->intra_block_list, plane, max_blocks_wide,
-                                          max_blocks_high);\
-
+                }
+                else {
+                // PALANTIR: set palantir interp block
+                    set_palantir_interp_block(mwd->intra_block_list, plane, max_blocks_wide,
+                                          max_blocks_high);
+                }
+            }
+            if (cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
+                if (is_current_block_within_some_anchor_block(pbi, mi_col * MI_BLOCK_SIZE, mi_row * MI_BLOCK_SIZE, max_blocks_wide * 4, max_blocks_high * 4)) {
+                    num_planes_within_anchor ++;
+                }
+            }
+        }
+        if (cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
+            if (num_planes_within_anchor == MAX_MB_PLANE) {
+                remove_palantir_interp_block_tail(mwd->intra_block_list);
             }
         }
 #if DEBUG_LATENCY
@@ -1448,12 +1563,39 @@ static void decode_block(TileWorkerData *twd, VP9Decoder *const pbi, int mi_row,
 #endif
     } else {
         mwd->metadata.num_interblocks++;
-        if (cm->nemo_cfg->decode_mode == DECODE_CACHE) {
+
+        int num_planes_within_anchor = 0;
+        if (cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE){
+            for (int plane = 0; plane < MAX_MB_PLANE; ++plane) {
+                const struct macroblockd_plane *const pd = &xd->plane[plane];
+                const TX_SIZE tx_size = plane ? get_uv_tx_size(mi, pd) : mi->tx_size;
+                const int num_4x4_w = pd->n4_w;
+                const int num_4x4_h = pd->n4_h;
+                const int step = (1 << tx_size);
+                int row, col;
+                const int max_blocks_wide =
+                        num_4x4_w + (xd->mb_to_right_edge >= 0
+                                    ? 0
+                                    : xd->mb_to_right_edge >> (5 + pd->subsampling_x));
+                const int max_blocks_high =
+                        num_4x4_h +
+                        (xd->mb_to_bottom_edge >= 0
+                        ? 0
+                        : xd->mb_to_bottom_edge >> (5 + pd->subsampling_y));
+                if(is_current_block_within_some_anchor_block(pbi, mi_col* MI_BLOCK_SIZE, mi_row * MI_BLOCK_SIZE, max_blocks_wide * 4, max_blocks_high * 4)) {
+                        num_planes_within_anchor ++;
+                }
+            }
+        }
+
+        int within_anchor_block = (num_planes_within_anchor == MAX_MB_PLANE);
+
+        if (cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE || cm->palantir_cfg->decode_mode == DECODE_CACHE) {
 #if DEBUG_LATENCY
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 #endif
-            /* NEMO: decode an inter-block */
-            dec_build_nemo_inter_predictors_sb(pbi, xd, mi_row, mi_col, false);
+            /* PALANTIR: decode an inter-block */
+            dec_build_palantir_inter_predictors_sb(pbi, xd, mi_row, mi_col, false, within_anchor_block);
 #if DEBUG_LATENCY
             clock_gettime(CLOCK_MONOTONIC, &finish_time);
             diff = (finish_time.tv_sec - start_time.tv_sec) * 1000 + (finish_time.tv_nsec - start_time.tv_nsec) / BILLION * 1000.0;
@@ -1463,11 +1605,12 @@ static void decode_block(TileWorkerData *twd, VP9Decoder *const pbi, int mi_row,
 #if DEBUG_LATENCY
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 #endif
-            /* NEMO: transfer super-resoluted pixels */
-            if (!cm->apply_dnn) {
+            /* PALANTIR: transfer super-resoluted pixels */
+            if (cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE || (!cm->frame_apply_dnn && cm->palantir_cfg->decode_mode == DECODE_CACHE)) 
+            {
                 vp9_setup_sr_planes(xd->plane, get_sr_frame_new_buffer(cm), mi_row, mi_col, &cm->sf_upsample_inter);  //check: sr frame
                 vp9_setup_res_planes(xd->plane, mwd->lr_resiudal, mi_row, mi_col);
-                dec_build_nemo_inter_predictors_sb(pbi, xd, mi_row, mi_col, true);
+                dec_build_palantir_inter_predictors_sb(pbi, xd, mi_row, mi_col, true, within_anchor_block);
             }
 #if DEBUG_LATENCY
             clock_gettime(CLOCK_MONOTONIC, &finish_time);
@@ -1510,15 +1653,16 @@ static void decode_block(TileWorkerData *twd, VP9Decoder *const pbi, int mi_row,
                 for (row = 0; row < max_blocks_high; row += step)
                     for (col = 0; col < max_blocks_wide; col += step)
                         eobtotal +=
-                                reconstruct_inter_block(twd, mi, plane, row, col, tx_size, cm);
-                /* NEMO: add an inter-block to inter_block_list for apply bilinear-interpolation */
-                if (!cm->apply_dnn) {
+                                reconstruct_inter_block(twd, mi, plane, mi_row, mi_col, row, col, tx_size, cm, pbi, within_anchor_block);
+                /* PALANTIR: add an inter-block to inter_block_list for apply bilinear-interpolation */
+                if ((cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE & !within_anchor_block) || (!cm->frame_apply_dnn && cm->palantir_cfg->decode_mode == DECODE_CACHE)) 
+                {
                     if (plane == 0)
-                        create_nemo_interp_block(mwd->inter_block_list, mi_col, mi_row,
+                        create_palantir_interp_block(mwd->inter_block_list, mi_col, mi_row,
                                                  max_blocks_wide,
                                                  max_blocks_high);
                     else
-                        set_nemo_interp_block(mwd->inter_block_list, plane, max_blocks_wide,
+                        set_palantir_interp_block(mwd->inter_block_list, plane, max_blocks_wide,
                                               max_blocks_high);
                 }
             }
@@ -1903,7 +2047,7 @@ static void setup_frame_size(VP9_COMMON *cm, struct vpx_read_bit_buffer *rb) {
     pool->frame_bufs[cm->new_fb_idx].buf.render_width = cm->render_width;
     pool->frame_bufs[cm->new_fb_idx].buf.render_height = cm->render_height;
 
-    /* NEMO */
+    /* PALANTIR */
     pool->frame_bufs[cm->new_fb_idx].current_video_frame = cm->current_video_frame;
     pool->frame_bufs[cm->new_fb_idx].current_super_frame = cm->current_super_frame;
 
@@ -2020,7 +2164,7 @@ static void setup_frame_size_with_refs(VP9_COMMON *cm,
     pool->frame_bufs[cm->new_fb_idx].buf.render_width = cm->render_width;
     pool->frame_bufs[cm->new_fb_idx].buf.render_height = cm->render_height;
 
-    /* NEMO */
+    /* PALANTIR */
     pool->frame_bufs[cm->new_fb_idx].current_video_frame = cm->current_video_frame;
     pool->frame_bufs[cm->new_fb_idx].current_super_frame = cm->current_super_frame;
 }
@@ -2117,13 +2261,16 @@ static void get_tile_buffers(VP9Decoder *pbi, const uint8_t *data,
     }
 }
 
-static void vpx_copy_buffer_uint8(const uint8_t *src, ptrdiff_t src_stride, uint8_t *dst, ptrdiff_t dst_stride, int x_offset, int y_offset, int width,
-                                  int height, int scale) {
-    src = src + (y_offset * src_stride + x_offset) * scale;
-    dst = dst + (y_offset * dst_stride + x_offset) * scale;
-
-    vpx_convolve_copy(src, src_stride, dst, dst_stride,
-                      NULL, 0, 0, 0, 0, width * scale, height * scale);
+static void vpx_copy_block_rgb24(RGB24_BUFFER_CONFIG *src, RGB24_BUFFER_CONFIG *dst, int src_x_offset, int src_y_offset, int dst_x_offset, int dst_y_offset, int block_width, int block_height) {
+    int src_stride = src->stride;
+    int dst_stride = dst->stride;
+    uint8_t *srcArray = src->buffer_alloc + sizeof(uint8_t)*(src_y_offset*src_stride + src_x_offset*3);
+    uint8_t *dstArray = dst->buffer_alloc + sizeof(uint8_t)*(dst_y_offset*dst_stride + dst_x_offset*3);
+    for (int y = 0; y < block_height; y ++){
+        memcpy(dstArray, srcArray, sizeof(uint8_t)*3*block_width);
+        dstArray += dst_stride*sizeof(uint8_t);
+        srcArray += src_stride*sizeof(uint8_t);
+    }
 }
 
 static void upscale_block_by_bilinear_interp(VP9Decoder *pbi) {
@@ -2131,9 +2278,10 @@ static void upscale_block_by_bilinear_interp(VP9Decoder *pbi) {
     struct timespec start_time, finish_time;
     double diff;
 #endif
-    /* NEMO: setup */
+    /* PALANTIR: setup */
     VP9_COMMON *cm = &pbi->common;
-    nemo_worker_data_t *mwd = pbi->nemo_worker_data;
+    palantir_cfg_t *palantir_cfg = cm->palantir_cfg;
+    palantir_worker_data_t *mwd = pbi->palantir_worker_data;
     YV12_BUFFER_CONFIG *lr_frame = get_frame_new_buffer(cm);
     YV12_BUFFER_CONFIG *sr_frame = get_sr_frame_new_buffer(cm);  //check: sr frame
     YV12_BUFFER_CONFIG *lr_residual = mwd->lr_resiudal;
@@ -2147,33 +2295,39 @@ static void upscale_block_by_bilinear_interp(VP9Decoder *pbi) {
     const int sr_frame_strides[MAX_MB_PLANE] = {sr_frame->y_stride, sr_frame->uv_stride, sr_frame->uv_stride};
     const int max_heights[MAX_MB_PLANE] = {lr_frame->y_crop_height, lr_frame->uv_crop_height, lr_frame->uv_crop_height};
     const int max_widths[MAX_MB_PLANE] = {lr_frame->y_crop_width, lr_frame->uv_crop_width, lr_frame->uv_crop_width};
-    nemo_interp_block_t *intra_block = mwd->intra_block_list->head;
-    nemo_interp_block_t *prev_block = NULL;
+    const int lr_frame_x_subsamplings[MAX_MB_PLANE] = {0, lr_frame->subsampling_x, lr_frame->subsampling_x};
+    const int lr_frame_y_subsamplings[MAX_MB_PLANE] = {0, lr_frame->subsampling_y, lr_frame->subsampling_y};
+    const int lr_residual_x_subsamplings[MAX_MB_PLANE] = {0, lr_residual->subsampling_x, lr_residual->subsampling_x};
+    const int lr_residual_y_subsamplings[MAX_MB_PLANE] = {0, lr_residual->subsampling_y, lr_residual->subsampling_y};
+    palantir_interp_block_t *intra_block = mwd->intra_block_list->head;
+    palantir_interp_block_t *prev_block = NULL;
 
 #if DEBUG_LATENCY
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 #endif
-    /* NEMO: up-scale intra blocks */
+    /* PALANTIR: up-scale intra blocks */
+    int block_idx = 0;
     while (intra_block != NULL) {
-        const int widths[MAX_MB_PLANE] = {intra_block->n4_w[0] * 4,
-                                          intra_block->n4_w[1] * 4, intra_block->n4_w[2] * 4};
-        const int heights[MAX_MB_PLANE] = {intra_block->n4_h[0] * 4,
-                                           intra_block->n4_h[1] * 4, intra_block->n4_h[2] * 4};
-        const int x_offsets[MAX_MB_PLANE] = {intra_block->mi_col
-                                             * MI_BLOCK_SIZE, intra_block->mi_col * MI_BLOCK_SIZE
-                                                     >> lr_frame->subsampling_x, intra_block->mi_col * MI_BLOCK_SIZE
-                                                     >> lr_frame->subsampling_x};
-        const int y_offsets[MAX_MB_PLANE] = {intra_block->mi_row
-                                             * MI_BLOCK_SIZE, intra_block->mi_row * MI_BLOCK_SIZE
-                                                     >> lr_frame->subsampling_y, intra_block->mi_row * MI_BLOCK_SIZE
-                                                     >> lr_frame->subsampling_y};
+        block_idx += 1;
+        const int widths[MAX_MB_PLANE] = {intra_block->n4_w[0] * 4, intra_block->n4_w[1] * 4, intra_block->n4_w[2] * 4};
+        const int heights[MAX_MB_PLANE] = {intra_block->n4_h[0] * 4, intra_block->n4_h[1] * 4, intra_block->n4_h[2] * 4};
+        const int x_offsets[MAX_MB_PLANE] = {intra_block->mi_col * MI_BLOCK_SIZE, intra_block->mi_col * MI_BLOCK_SIZE >> lr_frame->subsampling_x, intra_block->mi_col * MI_BLOCK_SIZE >> lr_frame->subsampling_x};
+        const int y_offsets[MAX_MB_PLANE] = {intra_block->mi_row * MI_BLOCK_SIZE, intra_block->mi_row * MI_BLOCK_SIZE >> lr_frame->subsampling_y, intra_block->mi_row * MI_BLOCK_SIZE >> lr_frame->subsampling_y};
 
         for (plane = 0; plane < MAX_MB_PLANE; ++plane) {
-            vpx_bilinear_interp_uint8(lr_frame_buffers[plane],
-                                      lr_frame_strides[plane], sr_frame_buffers[plane],
-                                      sr_frame_strides[plane], x_offsets[plane], y_offsets[plane],
-                                      widths[plane], heights[plane], cm->scale,
-                                      cm->nemo_cfg->bilinear_coeff);
+            if (palantir_cfg->save_super_finegrained_metadata) {
+                char log[LOG_MAX] = {0};
+                sprintf(log, "[INTRA]%d\t%d\t%d\t%d\t%d\t%d\t%d\n", plane, x_offsets[plane], y_offsets[plane], widths[plane], heights[plane], lr_frame_x_subsamplings[plane], lr_frame_y_subsamplings[plane]);
+                fputs(log, cm->super_finegrained_metadata_log);
+            }
+            if(palantir_cfg->save_finegrained_metadata){
+                update_palantir_dependency_graph_block_residual_v2_uint8(palantir_cfg, lr_frame_buffers[plane], lr_frame_strides[plane], x_offsets[plane], y_offsets[plane], widths[plane], heights[plane], lr_frame_x_subsamplings[plane], lr_frame_y_subsamplings[plane]);
+            } else if (palantir_cfg->save_super_finegrained_metadata) {
+                    ;
+            } else  {
+                vpx_bilinear_interp_uint8(lr_frame_buffers[plane], lr_frame_strides[plane], sr_frame_buffers[plane], sr_frame_strides[plane], x_offsets[plane], y_offsets[plane], widths[plane], heights[plane], cm->scale, cm->palantir_cfg->bilinear_coeff);
+            }
+            fprintf(stdout, "%d %d %d %d\n", x_offsets[plane], y_offsets[plane], widths[plane], heights[plane]);
         }
         prev_block = intra_block;
         intra_block = intra_block->next;
@@ -2189,12 +2343,14 @@ static void upscale_block_by_bilinear_interp(VP9Decoder *pbi) {
     mwd->latency.interp_intra_block += diff;
 #endif
 
-    nemo_interp_block_t *inter_block = mwd->inter_block_list->head;
+    palantir_interp_block_t *inter_block = mwd->inter_block_list->head;
 #if DEBUG_LATENCY
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 #endif
-    /* NEMO: up-scale residual of inter-blocks */
+    /* PALANTIR: up-scale residual of inter-blocks */
+    block_idx=0;
     while (inter_block != NULL) {
+        block_idx += 1;
         const int widths[MAX_MB_PLANE] = {inter_block->n4_w[0] * 4,
                                           inter_block->n4_w[1] * 4, inter_block->n4_w[2] * 4};
         const int heights[MAX_MB_PLANE] = {inter_block->n4_h[0] * 4,
@@ -2210,11 +2366,17 @@ static void upscale_block_by_bilinear_interp(VP9Decoder *pbi) {
 
 #if !TURN_OFF_RESIDUAL
         for (plane = 0; plane < MAX_MB_PLANE; ++plane) {
+            if(palantir_cfg->save_finegrained_metadata){
+                update_palantir_dependency_graph_block_residual_v2_int16(palantir_cfg, lr_residual_buffers[plane], lr_residual_strides[plane], x_offsets[plane], y_offsets[plane], widths[plane], heights[plane], lr_residual_x_subsamplings[plane], lr_residual_y_subsamplings[plane]);
+            }else if (palantir_cfg->save_super_finegrained_metadata) {
+                    ;
+            } else{
             vpx_bilinear_interp_int16(lr_residual_buffers[plane],
                                       lr_residual_strides[plane], sr_frame_buffers[plane],
                                       sr_frame_strides[plane], x_offsets[plane], y_offsets[plane],
                                       widths[plane], heights[plane], cm->scale,
-                                      cm->nemo_cfg->bilinear_coeff);
+                                      cm->palantir_cfg->bilinear_coeff);
+            }
         }
 #endif
 
@@ -2244,7 +2406,7 @@ static const uint8_t *decode_tiles(VP9Decoder *pbi, const uint8_t *data,
     int tile_row, tile_col;
     int mi_row, mi_col;
     TileWorkerData *tile_data = NULL;
-    nemo_worker_data_t *mwd = pbi->tile_worker_data->nemo_worker_data;
+    palantir_worker_data_t *mwd = pbi->tile_worker_data->palantir_worker_data;
 #if DEBUG_LATENCY
     struct timespec start_time, finish_time;
     double diff;
@@ -2262,7 +2424,7 @@ static const uint8_t *decode_tiles(VP9Decoder *pbi, const uint8_t *data,
     }
 
     //TODO: support loop filtering for DEOCDE_CACHE
-    if (cm->nemo_cfg->decode_mode == DECODE_CACHE) {
+    if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
         if (cm->lf.filter_level && !cm->skip_loop_filter) {
             LFWorkerData *const lf_data = (LFWorkerData *) pbi->lf_worker.data1;
             // Be sure to sync as we might be resuming after a failed frame decode.
@@ -2336,7 +2498,7 @@ static const uint8_t *decode_tiles(VP9Decoder *pbi, const uint8_t *data,
             }
 
             //TODO: support loop filtering for DEOCDE_CACHE
-            if (cm->nemo_cfg->decode_mode == DECODE_CACHE) {
+            if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
                 // Loopfilter one row.
                 if (cm->lf.filter_level && !cm->skip_loop_filter) {
                     const int lf_start = mi_row - MI_BLOCK_SIZE;
@@ -2383,7 +2545,7 @@ static const uint8_t *decode_tiles(VP9Decoder *pbi, const uint8_t *data,
     }
 
     //TODO: support loop filtering for DEOCDE_CACHE
-    if (cm->nemo_cfg->decode_mode == DECODE_CACHE) {
+    if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
         // Loopfilter remaining rows in the frame.
         if (cm->lf.filter_level && !cm->skip_loop_filter) {
             LFWorkerData *const lf_data = (LFWorkerData *) pbi->lf_worker.data1;
@@ -2416,7 +2578,7 @@ static int tile_worker_hook(void *arg1, void *arg2) {
     TileWorkerData *const tile_data = (TileWorkerData *) arg1;
     VP9Decoder *const pbi = (VP9Decoder *) arg2;
     VP9_COMMON *const cm = &pbi->common;
-    nemo_worker_data_t *const mwd = tile_data->nemo_worker_data;
+    palantir_worker_data_t *const mwd = tile_data->palantir_worker_data;
 
     TileInfo *volatile tile = &tile_data->xd.tile;
     const int final_col = (1 << pbi->common.log2_tile_cols) - 1;
@@ -2464,65 +2626,49 @@ static int tile_worker_hook(void *arg1, void *arg2) {
     return !tile_data->xd.corrupted;
 }
 
-static int nemo_worker_hook(void *arg1, void *arg2) {
+static int palantir_worker_hook(void *arg1, void *arg2) {
     TileWorkerData *const tile_data = (TileWorkerData *) arg1;
     VP9Decoder *const pbi = (VP9Decoder *) arg2;
     VP9_COMMON *cm = &pbi->common;
-    nemo_worker_data_t *mwd = tile_data->nemo_worker_data;
+    palantir_worker_data_t *mwd = tile_data->palantir_worker_data;
     int plane;
 #if DEBUG_LATENCY
     struct timespec start_time, finish_time;
     double diff;
 #endif
 
-    assert (cm->nemo_cfg->decode_mode == DECODE_CACHE);
+    assert (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE);
 
-    /* NEMO: setup */
+    /* PALANTIR: setup */
     YV12_BUFFER_CONFIG *lr_frame = get_frame_new_buffer(cm);
     YV12_BUFFER_CONFIG *sr_frame = get_sr_frame_new_buffer(cm); //check: sr frame
     YV12_BUFFER_CONFIG *lr_residual = mwd->lr_resiudal;
-    uint8_t *const lr_frame_buffers[MAX_MB_PLANE] = {lr_frame->y_buffer, lr_frame->u_buffer,
-                                                     lr_frame->v_buffer};
-    const int lr_frame_strides[MAX_MB_PLANE] = {lr_frame->y_stride, lr_frame->uv_stride,
-                                                lr_frame->uv_stride};
+    uint8_t *const lr_frame_buffers[MAX_MB_PLANE] = {lr_frame->y_buffer, lr_frame->u_buffer, lr_frame->v_buffer};
+    const int lr_frame_strides[MAX_MB_PLANE] = {lr_frame->y_stride, lr_frame->uv_stride, lr_frame->uv_stride};
     int16_t *const lr_residual_buffers[MAX_MB_PLANE] = {(int16_t *) lr_residual->y_buffer,
                                                         (int16_t *) lr_residual->u_buffer,
                                                         (int16_t *) lr_residual->v_buffer};
-    const int lr_residual_strides[MAX_MB_PLANE] = {lr_residual->y_stride / 2,
-                                                   lr_residual->uv_stride / 2,
-                                                   lr_residual->uv_stride / 2};
-    uint8_t *const sr_frame_buffers[MAX_MB_PLANE] = {sr_frame->y_buffer, sr_frame->u_buffer,
-                                                     sr_frame->v_buffer};
-    const int sr_frame_strides[MAX_MB_PLANE] = {sr_frame->y_stride, sr_frame->uv_stride,
-                                                sr_frame->uv_stride};
+    const int lr_residual_strides[MAX_MB_PLANE] = {lr_residual->y_stride / 2, lr_residual->uv_stride / 2, lr_residual->uv_stride / 2};
+    uint8_t *const sr_frame_buffers[MAX_MB_PLANE] = {sr_frame->y_buffer, sr_frame->u_buffer, sr_frame->v_buffer};
+    const int sr_frame_strides[MAX_MB_PLANE] = {sr_frame->y_stride, sr_frame->uv_stride, sr_frame->uv_stride};
 
 #if DEBUG_LATENCY
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 #endif
-    /* NEMO: up-scale intra-blocks */
-    nemo_interp_block_t *intra_block = mwd->intra_block_list->head;
-    nemo_interp_block_t *prev_block = NULL;
+    /* PALANTIR: up-scale intra-blocks */
+    palantir_interp_block_t *intra_block = mwd->intra_block_list->head;
+    palantir_interp_block_t *prev_block = NULL;
     while (intra_block != NULL) {
-        const int widths[MAX_MB_PLANE] = {intra_block->n4_w[0] * 4, intra_block->n4_w[1] * 4,
-                                          intra_block->n4_w[2] * 4};
-        const int heights[MAX_MB_PLANE] = {intra_block->n4_h[0] * 4, intra_block->n4_h[1] * 4,
-                                           intra_block->n4_h[2] * 4};
-        const int x_offsets[MAX_MB_PLANE] = {intra_block->mi_col * MI_BLOCK_SIZE,
-                                             intra_block->mi_col * MI_BLOCK_SIZE
-                                                     >> lr_frame->subsampling_x,
-                                             intra_block->mi_col * MI_BLOCK_SIZE
-                                                     >> lr_frame->subsampling_x};
-        const int y_offsets[MAX_MB_PLANE] = {intra_block->mi_row * MI_BLOCK_SIZE,
-                                             intra_block->mi_row * MI_BLOCK_SIZE
-                                                     >> lr_frame->subsampling_y,
-                                             intra_block->mi_row * MI_BLOCK_SIZE
-                                                     >> lr_frame->subsampling_y};
+        const int widths[MAX_MB_PLANE] = {intra_block->n4_w[0] * 4, intra_block->n4_w[1] * 4, intra_block->n4_w[2] * 4};
+        const int heights[MAX_MB_PLANE] = {intra_block->n4_h[0] * 4, intra_block->n4_h[1] * 4, intra_block->n4_h[2] * 4};
+        const int x_offsets[MAX_MB_PLANE] = {intra_block->mi_col * MI_BLOCK_SIZE, intra_block->mi_col * MI_BLOCK_SIZE >> lr_frame->subsampling_x, intra_block->mi_col * MI_BLOCK_SIZE >> lr_frame->subsampling_x};
+        const int y_offsets[MAX_MB_PLANE] = {intra_block->mi_row * MI_BLOCK_SIZE, intra_block->mi_row * MI_BLOCK_SIZE >> lr_frame->subsampling_y, intra_block->mi_row * MI_BLOCK_SIZE >> lr_frame->subsampling_y};
 
         for (plane = 0; plane < MAX_MB_PLANE; ++plane) {
             vpx_bilinear_interp_uint8(lr_frame_buffers[plane], lr_frame_strides[plane],
                                       sr_frame_buffers[plane], sr_frame_strides[plane],
                                       x_offsets[plane], y_offsets[plane], widths[plane],
-                                      heights[plane], cm->scale, cm->nemo_cfg->bilinear_coeff);
+                                      heights[plane], cm->scale, cm->palantir_cfg->bilinear_coeff);
         }
         prev_block = intra_block;
         intra_block = intra_block->next;
@@ -2536,8 +2682,8 @@ static int nemo_worker_hook(void *arg1, void *arg2) {
     diff = (finish_time.tv_sec - start_time.tv_sec) * 1000 + (finish_time.tv_nsec - start_time.tv_nsec) / BILLION * 1000.0;
     mwd->latency.interp_intra_block += diff;
 #endif
-    /* NEMO: up-scale residual of inter-blocks */
-    nemo_interp_block_t *inter_block = mwd->inter_block_list->head;
+    /* PALANTIR: up-scale residual of inter-blocks */
+    palantir_interp_block_t *inter_block = mwd->inter_block_list->head;
 #if DEBUG_LATENCY
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 #endif
@@ -2562,7 +2708,7 @@ static int nemo_worker_hook(void *arg1, void *arg2) {
             vpx_bilinear_interp_int16(lr_residual_buffers[plane], lr_residual_strides[plane],
                                       sr_frame_buffers[plane], sr_frame_strides[plane],
                                       x_offsets[plane], y_offsets[plane], widths[plane],
-                                      heights[plane], cm->scale, cm->nemo_cfg->bilinear_coeff);
+                                      heights[plane], cm->scale, cm->palantir_cfg->bilinear_coeff);
         }
 #endif
 
@@ -2626,7 +2772,7 @@ static const uint8_t *decode_tiles_mt(VP9Decoder *pbi, const uint8_t *data,
         VPxWorker *const worker = &pbi->tile_workers[n];
         TileWorkerData *const tile_data =
                 &pbi->tile_worker_data[n + pbi->total_tiles];
-        tile_data->nemo_worker_data = &pbi->nemo_worker_data[n]; // NEMO
+        tile_data->palantir_worker_data = &pbi->palantir_worker_data[n]; // PALANTIR
         winterface->sync(worker);
         tile_data->xd = pbi->mb;
         tile_data->xd.counts =
@@ -2769,9 +2915,9 @@ static void upscale_block_by_bilinear_interp_mt(VP9Decoder *pbi) {
         VPxWorker *const worker = &pbi->tile_workers[n];
         TileWorkerData *const tile_data =
                 &pbi->tile_worker_data[n + pbi->total_tiles];
-        tile_data->nemo_worker_data = &pbi->nemo_worker_data[n]; //NEMO
+        tile_data->palantir_worker_data = &pbi->palantir_worker_data[n]; //PALANTIR
         winterface->sync(worker);
-        worker->hook = nemo_worker_hook;
+        worker->hook = palantir_worker_hook;
         worker->data1 = tile_data;
         worker->data2 = pbi;
     }
@@ -2919,8 +3065,8 @@ static size_t read_uncompressed_header(VP9Decoder *pbi,
             memset(&cm->ref_frame_map, -1, sizeof(cm->ref_frame_map));
             pbi->need_resync = 0;
         }
-        /* NEMO: setup */
-        if (cm->nemo_cfg->decode_mode == DECODE_CACHE || cm->nemo_cfg->decode_mode == DECODE_SR) {
+        /* PALANTIR: setup */
+        if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE || cm->palantir_cfg->decode_mode == DECODE_SR) {
             setup_sr_frame_size(cm);
         }
     } else {
@@ -2955,8 +3101,8 @@ static size_t read_uncompressed_header(VP9Decoder *pbi,
                 memset(&cm->ref_frame_map, -1, sizeof(cm->ref_frame_map));
                 pbi->need_resync = 0;
             }
-            /* NEMO: setup */
-            if (cm->nemo_cfg->decode_mode == DECODE_CACHE || cm->nemo_cfg->decode_mode == DECODE_SR) {
+            /* PALANTIR: setup */
+            if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE || cm->palantir_cfg->decode_mode == DECODE_SR) {
                 setup_sr_frame_size(cm);
             }
         } else if (pbi->need_resync != 1) { /* Skip if need resync */
@@ -2976,8 +3122,8 @@ static size_t read_uncompressed_header(VP9Decoder *pbi,
 
             setup_frame_size_with_refs(cm, rb);
 
-            /* NEMO: setup */
-            if (cm->nemo_cfg->decode_mode == DECODE_CACHE || cm->nemo_cfg->decode_mode == DECODE_SR) {
+            /* PALANTIR: setup */
+            if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE || cm->palantir_cfg->decode_mode == DECODE_SR) {
                 setup_sr_frame_size_with_refs(cm);
             }
 
@@ -2995,8 +3141,8 @@ static size_t read_uncompressed_header(VP9Decoder *pbi,
                 vp9_setup_scale_factors_for_frame(
                         &ref_buf->sf, ref_buf->buf->y_crop_width,
                         ref_buf->buf->y_crop_height, cm->width, cm->height);
-                /* NEMO: setup */
-                if (cm->nemo_cfg->decode_mode == DECODE_CACHE) {
+                /* PALANTIR: setup */
+                if (cm->palantir_cfg->decode_mode == DECODE_CACHE|| cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
                     vp9_setup_scale_factors_for_sr_frame(
                             &ref_buf->sf_sr, ref_buf->buf_sr->y_crop_width,
                             ref_buf->buf_sr->y_crop_height, cm->width, cm->height, false, false, cm->scale);
@@ -3070,13 +3216,13 @@ static size_t read_uncompressed_header(VP9Decoder *pbi,
         vpx_internal_error(&cm->error, VPX_CODEC_CORRUPT_FRAME,
                            "Invalid header size");
 
-    /* NEMO: setup */
-    if (cm->nemo_cfg->decode_mode == DECODE_CACHE) {
+    /* PALANTIR: setup */
+    if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
         const int num_threads = (pbi->max_threads > 1) ? pbi->max_threads : 1;
         vp9_setup_scale_factors_for_sr_frame(
                 &cm->sf_upsample_inter, cm->scale, cm->scale, 1, 1, true, true, cm->scale);
         for (i = 0; i < num_threads; ++i) {
-            setup_residual_size(cm, pbi->nemo_worker_data[i].lr_resiudal);
+            setup_residual_size(cm, pbi->palantir_worker_data[i].lr_resiudal);
         }
     }
 
@@ -3175,66 +3321,185 @@ BITSTREAM_PROFILE vp9_read_profile(struct vpx_read_bit_buffer *rb) {
 void upscale_frame_by_offline_dnn(VP9_COMMON *const cm) {
     char file_path[PATH_MAX] = {0};
     if (cm->show_frame)
-        sprintf(file_path, "%s/%05d.raw", cm->nemo_cfg->sr_offline_frame_dir, cm->current_video_frame);
+        sprintf(file_path, "%s/%04d.raw", cm->palantir_cfg->sr_offline_frame_dir, cm->current_video_frame);
     else
-        sprintf(file_path, "%s/%05d_%d.raw", cm->nemo_cfg->sr_offline_frame_dir, cm->current_video_frame, cm->current_super_frame);
-    RGB24_realloc_frame_buffer(cm->rgb24_sr_tensor, cm->width * cm->scale, cm->height * cm->scale);
-    RGB24_load_frame_buffer(cm->rgb24_sr_tensor, file_path);
-    RGB24_to_YV12(get_sr_frame_new_buffer(cm), cm->rgb24_sr_tensor, cm->color_space, cm->color_range);
+        sprintf(file_path, "%s/%04d_%d.raw", cm->palantir_cfg->sr_offline_frame_dir, cm->current_video_frame, cm->current_super_frame);
+    if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_SR) {
+        RGB24_realloc_frame_buffer(cm->rgb24_sr_tensor, cm->width * cm->scale, cm->height * cm->scale);
+        RGB24_load_frame_buffer(cm->rgb24_sr_tensor, file_path);
+        RGB24_to_YV12(get_sr_frame_new_buffer(cm), cm->rgb24_sr_tensor, cm->color_space, cm->color_range);
+    } else {
+
+        // Step 0: copy cache-based SR result
+        RGB24_realloc_frame_buffer(cm->rgb24_sr_tensor, cm->width * cm->scale, cm->height * cm->scale);
+        YV12_to_RGB24(cm->rgb24_sr_tensor, get_sr_frame_new_buffer(cm), cm->color_space, cm->color_range);
+
+        // Step 1: load SR result from local storage
+        RGB24_BUFFER_CONFIG *local_rgb24_sr_tensor = (RGB24_BUFFER_CONFIG *) vpx_calloc(1, sizeof(RGB24_BUFFER_CONFIG));
+        RGB24_realloc_frame_buffer(local_rgb24_sr_tensor, cm->width*cm->scale, cm->height*cm->scale);
+        RGB24_load_frame_buffer(local_rgb24_sr_tensor, file_path);
+
+        // Step 2: overwrite cache-based SR result
+        for (int i = 0; i < cm->palantir_cfg->num_patches_per_row; i ++) {
+            for (int j = 0; j < cm->palantir_cfg->num_patches_per_column; j ++){
+                int index = i * cm->palantir_cfg->num_patches_per_column + j;
+                if (cm->palantir_cfg->cache_profile->block_apply_dnn[index]==1) {
+                    vpx_copy_block_rgb24(local_rgb24_sr_tensor, cm->rgb24_sr_tensor, i * cm->palantir_cfg->patch_width * cm->scale, j * cm->palantir_cfg->patch_height * cm->scale, i * cm->palantir_cfg->patch_width * cm->scale, j * cm->palantir_cfg->patch_height * cm->scale, cm->scale * cm->palantir_cfg->patch_width, cm->palantir_cfg->patch_height * cm->scale);
+                }
+            }
+        }
+
+        // Step 3: convert result from RGB24 to YV12
+        RGB24_to_YV12(get_sr_frame_new_buffer(cm), cm->rgb24_sr_tensor, cm->color_space, cm->color_range);
+
+        // Step 4: free memory
+        RGB24_free_frame_buffer(local_rgb24_sr_tensor);
+        vpx_free(local_rgb24_sr_tensor);
+    }
 }
 
 void upscale_frame_by_online_dnn(VP9_COMMON *const cm) {
-#if DEBUG_LATENCY
-    struct timespec start_time, finish_time;
-    double diff;
-#endif
-    RGB24_realloc_frame_buffer(cm->rgb24_input_tensor, cm->width, cm->height);
-    RGB24_realloc_frame_buffer(cm->rgb24_sr_tensor, cm->width * cm->scale, cm->height * cm->scale);
-#if DEBUG_LATENCY
-    clock_gettime(CLOCK_MONOTONIC, &start_time);
-#endif
-    YV12_to_RGB24(cm->rgb24_input_tensor, get_frame_new_buffer(cm), cm->color_space, cm->color_range);
-#if DEBUG_LATENCY
-    clock_gettime(CLOCK_MONOTONIC, &finish_time);
-    diff = (finish_time.tv_sec - start_time.tv_sec) * 1000
-           + (finish_time.tv_nsec - start_time.tv_nsec) / BILLION * 1000.0;
-    cm->latency.sr_convert_yuv_to_rgb += diff;
-#endif
-#if DEBUG_LATENCY
-    clock_gettime(CLOCK_MONOTONIC, &start_time);
-#endif
+
 #if CONFIG_SNPE
-    snpe_execute_byte(cm->nemo_cfg->dnn->interpreter, cm->rgb24_input_tensor->buffer_alloc, cm->rgb24_sr_tensor->buffer_alloc_float,
-                      3 * cm->height * cm->width);
-#endif
 #if DEBUG_LATENCY
-    clock_gettime(CLOCK_MONOTONIC, &finish_time);
-    diff = (finish_time.tv_sec - start_time.tv_sec) * 1000
-           + (finish_time.tv_nsec - start_time.tv_nsec) / BILLION * 1000.0;
-    cm->latency.sr_execute_dnn += diff;
+    struct timespec start_time, finish_time, start_time_0, finish_time_0, start_time1, finish_time1;
+    double diff = 0;
+    double diff0 = 0;
+    cm->latency.sr_num_anchors = 0;
 #endif
-#if DEBUG_LATENCY
-    clock_gettime(CLOCK_MONOTONIC, &start_time);
-#endif
-//    RGB24_float_to_uint8(cm->rgb24_sr_tensor);
-    RGB24_float_to_uint8(cm->rgb24_sr_tensor);
-#if DEBUG_LATENCY
-    clock_gettime(CLOCK_MONOTONIC, &finish_time);
-    diff = (finish_time.tv_sec - start_time.tv_sec) * 1000
-           + (finish_time.tv_nsec - start_time.tv_nsec) / BILLION * 1000.0;
-    cm->latency.sr_convert_float_to_int += diff;
-#endif
-#if DEBUG_LATENCY
-    clock_gettime(CLOCK_MONOTONIC, &start_time);
-#endif
-    RGB24_to_YV12(get_sr_frame_new_buffer(cm), cm->rgb24_sr_tensor, cm->color_space, cm->color_range);
-#if DEBUG_LATENCY
-    clock_gettime(CLOCK_MONOTONIC, &finish_time);
-    diff = (finish_time.tv_sec - start_time.tv_sec) * 1000
-           + (finish_time.tv_nsec - start_time.tv_nsec) / BILLION * 1000.0;
-    cm->latency.sr_convert_rgb_to_yuv += diff;
+    if (cm->palantir_cfg->decode_mode == DECODE_CACHE) {
+        RGB24_realloc_frame_buffer(cm->rgb24_input_tensor, cm->width, cm->height);
+        RGB24_realloc_frame_buffer(cm->rgb24_sr_tensor, cm->width * cm->scale, cm->height * cm->scale);
+
+        #if DEBUG_LATENCY
+            clock_gettime(CLOCK_MONOTONIC, &start_time_0);
+        #endif
+        YV12_to_RGB24(cm->rgb24_input_tensor, get_frame_new_buffer(cm), cm->color_space, cm->color_range);
+        #if DEBUG_LATENCY
+            clock_gettime(CLOCK_MONOTONIC, &finish_time_0);
+            cm->latency.sr_convert_yuv_to_rgb += (finish_time_0.tv_sec - start_time_0.tv_sec) * 1000 + (finish_time_0.tv_nsec - start_time_0.tv_nsec) / BILLION * 1000.0;
+        #endif
+        #if DEBUG_LATENCY
+            clock_gettime(CLOCK_MONOTONIC, &start_time_0);
+        #endif
+        snpe_execute_byte(cm->palantir_cfg->dnn->interpreter, cm->rgb24_input_tensor->buffer_alloc, cm->rgb24_sr_tensor->buffer_alloc_float, 3 * cm->height * cm->width);
+        #if DEBUG_LATENCY
+            clock_gettime(CLOCK_MONOTONIC, &finish_time_0);
+            cm->latency.sr_execute_dnn += (finish_time_0.tv_sec - start_time_0.tv_sec) * 1000 + (finish_time_0.tv_nsec - start_time_0.tv_nsec) / BILLION * 1000.0;
+        #endif
+        #if DEBUG_LATENCY
+            clock_gettime(CLOCK_MONOTONIC, &start_time_0);
+        #endif
+        RGB24_float_to_uint8(cm->rgb24_sr_tensor);
+        #if DEBUG_LATENCY
+            clock_gettime(CLOCK_MONOTONIC, &finish_time_0);
+            cm->latency.sr_convert_float_to_int += (finish_time_0.tv_sec - start_time_0.tv_sec) * 1000 + (finish_time_0.tv_nsec - start_time_0.tv_nsec) / BILLION * 1000.0;
+        #endif
+        #if DEBUG_LATENCY
+            clock_gettime(CLOCK_MONOTONIC, &start_time_0);
+        #endif
+        RGB24_to_YV12(get_sr_frame_new_buffer(cm), cm->rgb24_sr_tensor, cm->color_space, cm->color_range);
+        #if DEBUG_LATENCY
+            clock_gettime(CLOCK_MONOTONIC, &finish_time_0);
+            cm->latency.sr_convert_rgb_to_yuv += (finish_time_0.tv_sec - start_time_0.tv_sec) * 1000 + (finish_time_0.tv_nsec - start_time_0.tv_nsec) / BILLION * 1000.0;
+        #endif
+    } else if (cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
+        for (int i = 0; i < cm->palantir_cfg->num_patches_per_row; i ++) {
+            for (int j = 0; j < cm->palantir_cfg->num_patches_per_column; j ++){
+                int index = i * cm->palantir_cfg->num_patches_per_column + j;
+                if (cm->palantir_cfg->cache_profile->block_apply_dnn[index]==1) {
+                    #if DEBUG_LATENCY
+                        cm->latency.sr_num_anchors += 1;
+                    #endif
+                    #if DEBUG_LATENCY
+                        clock_gettime(CLOCK_MONOTONIC, &start_time_0);
+                    #endif
+                    YV12_to_RGB24_patch(cm->palantir_cfg->cache_profile->anchor_block_input_buffer, get_frame_new_buffer(cm), cm->color_space, cm->color_range, i*cm->palantir_cfg->patch_width, j*cm->palantir_cfg->patch_height, 0, 0, cm->palantir_cfg->patch_width, cm->palantir_cfg->patch_height);
+                    #if DEBUG_LATENCY
+                        clock_gettime(CLOCK_MONOTONIC, &finish_time_0);
+                        cm->latency.sr_convert_yuv_to_rgb += (finish_time_0.tv_sec - start_time_0.tv_sec) * 1000 + (finish_time_0.tv_nsec - start_time_0.tv_nsec) / BILLION * 1000.0;
+                    #endif
+                    #if DEBUG_LATENCY
+                        clock_gettime(CLOCK_MONOTONIC, &start_time_0);
+                    #endif
+                    snpe_execute_byte(cm->palantir_cfg->dnn->interpreter, cm->palantir_cfg->cache_profile->anchor_block_input_buffer->buffer_alloc, cm->palantir_cfg->cache_profile->anchor_block_sr_buffer->buffer_alloc_float, 3 * cm->palantir_cfg->patch_width * cm->palantir_cfg->patch_height);
+                    #if DEBUG_LATENCY
+                        clock_gettime(CLOCK_MONOTONIC, &finish_time_0);
+                        cm->latency.sr_execute_dnn += (finish_time_0.tv_sec - start_time_0.tv_sec) * 1000 + (finish_time_0.tv_nsec - start_time_0.tv_nsec) / BILLION * 1000.0;
+                    #endif
+                    #if DEBUG_LATENCY
+                        clock_gettime(CLOCK_MONOTONIC, &start_time_0);
+                    #endif
+                    RGB24_float_to_uint8(cm->palantir_cfg->cache_profile->anchor_block_sr_buffer);
+                    #if DEBUG_LATENCY
+                        clock_gettime(CLOCK_MONOTONIC, &finish_time_0);
+                        cm->latency.sr_convert_float_to_int += (finish_time_0.tv_sec - start_time_0.tv_sec) * 1000 + (finish_time_0.tv_nsec - start_time_0.tv_nsec) / BILLION * 1000.0;
+                    #endif
+                    #if DEBUG_LATENCY
+                        clock_gettime(CLOCK_MONOTONIC, &start_time_0);
+                    #endif
+                    RGB24_to_YV12_patch(get_sr_frame_new_buffer(cm), cm->palantir_cfg->cache_profile->anchor_block_sr_buffer, cm->color_space, cm->color_range, 0, 0, i*cm->palantir_cfg->patch_width*cm->scale, j*cm->palantir_cfg->patch_height*cm->scale, cm->palantir_cfg->patch_width*cm->scale, cm->palantir_cfg->patch_height*cm->scale);
+                    #if DEBUG_LATENCY
+                        clock_gettime(CLOCK_MONOTONIC, &finish_time_0);
+                        cm->latency.sr_convert_rgb_to_yuv += (finish_time_0.tv_sec - start_time_0.tv_sec) * 1000 + (finish_time_0.tv_nsec - start_time_0.tv_nsec) / BILLION * 1000.0;
+                    #endif
+                }
+            }
+        }
+    }
 #endif
 }
+
+static void save_sr_rgbframe(VP9_COMMON *cm) {
+    char file_path[PATH_MAX] = {0};
+    int width, height;
+    if (cm->palantir_cfg->target_height != 0 && cm->palantir_cfg->target_width != 0) {
+        width = cm->palantir_cfg->target_width;
+        height = cm->palantir_cfg->target_height;
+    } else {
+        width = cm->width;
+        height = cm->height;
+    }
+
+    if (cm->show_frame) {
+        sprintf(file_path, "%s/%04d.raw", cm->palantir_cfg->sr_frame_dir,
+                cm->current_video_frame);
+    } else {
+        sprintf(file_path, "%s/%04d_%d.raw", cm->palantir_cfg->sr_frame_dir, cm->current_video_frame,
+                cm->current_super_frame);
+    }
+
+    //up-scale a yuv frame
+    YV12_BUFFER_CONFIG *yuv_frame = get_sr_frame_new_buffer(cm);
+    YV12_BUFFER_CONFIG *scaled_yuv_frame = cm->yv12_reference_frame;
+    RGB24_BUFFER_CONFIG *scaled_rgb_frame = cm->rgb24_reference_frame;
+    vpx_realloc_frame_buffer(
+            scaled_yuv_frame, width, height,
+            cm->subsampling_x,
+            cm->subsampling_y,
+#if CONFIG_VP9_HIGHBITDEPTH
+            cm->use_highbitdepth,
+#endif
+            VP9_DEC_BORDER_IN_PIXELS, cm->byte_alignment,
+            NULL, NULL, NULL);
+    I420Scale(yuv_frame->y_buffer, yuv_frame->y_stride,
+              yuv_frame->u_buffer, yuv_frame->uv_stride,
+              yuv_frame->v_buffer, yuv_frame->uv_stride,
+              yuv_frame->y_crop_width, yuv_frame->y_crop_height,
+              scaled_yuv_frame->y_buffer, scaled_yuv_frame->y_stride,
+              scaled_yuv_frame->u_buffer, scaled_yuv_frame->uv_stride,
+              scaled_yuv_frame->v_buffer, scaled_yuv_frame->uv_stride,
+              scaled_yuv_frame->y_crop_width, scaled_yuv_frame->y_crop_height,
+              3);
+
+    //convert a yuv frame into a rgb frame
+    RGB24_realloc_frame_buffer(scaled_rgb_frame, width, height);
+    YV12_to_RGB24( scaled_rgb_frame, scaled_yuv_frame, cm->color_space, cm->color_range);
+
+    //save a rgb frame
+    RGB24_save_frame_buffer(scaled_rgb_frame, file_path);
+}
+
 
 void vp9_decode_frame(VP9Decoder *pbi, const uint8_t *data,
                       const uint8_t *data_end, const uint8_t **p_data_end) {
@@ -3297,71 +3562,69 @@ void vp9_decode_frame(VP9Decoder *pbi, const uint8_t *data,
         CHECK_MEM_ERROR(cm, pbi->tile_worker_data, vpx_memalign(32, twd_size));
         pbi->total_tiles = tile_rows * tile_cols;
 
-        /* NEMO: initialize per-thread worker data */
+        /* PALANTIR: initialize per-thread worker data */
         for (i = 0; i < num_tile_workers; i++) {
-            pbi->tile_worker_data[i].nemo_worker_data = &pbi->nemo_worker_data[0]; //init as 0
+            pbi->tile_worker_data[i].palantir_worker_data = &pbi->palantir_worker_data[0]; //init as 0
         }
     }
 
     const int num_threads = (pbi->max_threads > 1) ? pbi->max_threads : 1;
 
-    /* NEMO: initialize per-thread worker data */
+    /* PALANTIR: initialize per-thread worker data */
     for (i = 0; i < num_threads; i++) {
-        if (cm->nemo_cfg->decode_mode == DECODE_CACHE) {
-            memset(pbi->nemo_worker_data[i].lr_resiudal->buffer_alloc, 0, pbi->nemo_worker_data[i].lr_resiudal->buffer_alloc_sz);
+        if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
+            memset(pbi->palantir_worker_data[i].lr_resiudal->buffer_alloc, 0, pbi->palantir_worker_data[i].lr_resiudal->buffer_alloc_sz);
         }
-        memset(&pbi->nemo_worker_data[i].latency, 0, sizeof(nemo_latency_t));
-        memset(&pbi->nemo_worker_data[i].metadata, 0, sizeof(nemo_metdata_t));
+        memset(&pbi->palantir_worker_data[i].latency, 0, sizeof(palantir_latency_t));
+        memset(&pbi->palantir_worker_data[i].metadata, 0, sizeof(palantir_metdata_t));
     }
 
-    /* NEMO: decide whether to apply a DNN to the current frame */
-    nemo_cache_profile_t *cache_profile;
-    switch (cm->nemo_cfg->decode_mode) {
+    /* PALANTIR: decide whether to apply a DNN to the current frame */
+    palantir_cache_profile_t *cache_profile = cm->palantir_cfg->cache_profile;
+    switch (cm->palantir_cfg->decode_mode) {
         case DECODE_SR:
-            cm->apply_dnn = 1;
+            cm->frame_apply_dnn = 1;
             break;
-        case DECODE_CACHE:
-            switch (cm->nemo_cfg->cache_mode) {
+        case DECODE_CACHE:case DECODE_BLOCK_CACHE:
+            switch (cm->palantir_cfg->cache_mode) {
                 case PROFILE_CACHE:
-                    cache_profile = cm->nemo_cfg->cache_profile;
                     if (cm->frame_type == KEY_FRAME) {
-                        // (deprecated) cache loopback
-                        if (cm->current_video_frame != 0 && cm->current_video_frame % 8991 == 0) {
-                            cache_profile->offset = 0;
-                            rewind(cache_profile->file);
-                            cache_profile->num_dummy_bits = 0;
-                        }
-
-                        if (read_cache_profile_dummy_bits(cache_profile) == -1) {
-                            fprintf(stderr, "%s: fall back to NO_CACHE mode\n", __func__);
-                            cm->nemo_cfg->cache_mode = NO_CACHE;
-                            cm->apply_dnn = 0;
+                        if (cm->current_video_frame % 60 == 0) {
+                            if (read_cache_profile_dummy_bits(cache_profile) == -1) {
+                                fprintf(stderr, "%s: fall back to NO_CACHE mode\n", __func__);
+                                cm->palantir_cfg->cache_mode = NO_CACHE;
+                                cm->frame_apply_dnn = 0;
+                            }
+                            fprintf(stdout, "profile read\n");
+                            fprintf(stdout, "palantir_cfg %d %d", cm->palantir_cfg->num_patches_per_row, cm->palantir_cfg->num_patches_per_column);
+                            fprintf(stdout, "frame_apply_dnn=%d\n", cm->frame_apply_dnn);
                         }
                     }
 
-                    if ((cm->apply_dnn = read_cache_profile(cache_profile)) == -1) {
+                    if ((cm->frame_apply_dnn=read_cache_profile(cache_profile, cm->palantir_cfg->num_patches_per_row, cm->palantir_cfg->num_patches_per_column, cm->palantir_cfg->save_finegrained_metadata, cm->palantir_cfg->save_super_finegrained_metadata)) == -1) {
                         fprintf(stderr, "%s: fall back to NO_CACHE mode\n", __func__);
-                        cm->nemo_cfg->cache_mode = NO_CACHE;
-                        cm->apply_dnn = 0;
+                        cm->palantir_cfg->cache_mode = NO_CACHE;
+                        cm->frame_apply_dnn = 0;
                     }
+                    fprintf(stdout, "frame_apply_dnn=%d\n", cm->frame_apply_dnn);
                     break;
                 case KEY_FRAME_CACHE:
-                    cm->apply_dnn = (cm->frame_type == KEY_FRAME ? 1 : 0);
+                    cm->frame_apply_dnn = (cm->frame_type == KEY_FRAME ? 1 : 0);
                     break;
                 case NO_CACHE:
-                    cm->apply_dnn = 0;
+                    cm->frame_apply_dnn = 0;
                     break;
             }
             break;
         case DECODE:
-            cm->apply_dnn = 0;
+            cm->frame_apply_dnn = 0;
             break;
     }
 
-    /* (deprecated) NEMO: fullfill buffer at the beginning of video streaming */
-    if (cm->nemo_cfg->decode_mode == DECODE_CACHE) {
+    /* (deprecated) PALANTIR: fullfill buffer at the beginning of video streaming */
+    if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
         if (cm->current_video_frame < 100) {
-            cm->apply_dnn = 0;
+            //cm->frame_apply_dnn = 0;
         }
     }
 
@@ -3373,27 +3636,29 @@ void vp9_decode_frame(VP9Decoder *pbi, const uint8_t *data,
             if (!cm->skip_loop_filter) {
                 // If multiple threads are used to decode tiles, then we use those
                 // threads to do parallel loopfiltering.
-                //TODO: support loop filtering for DECODE_CACHE
+                //TODO: support loop filtering for DECODE_CACHE and DECODE_BLOCK_CACHE
                 vp9_loop_filter_frame_mt(new_fb, cm, pbi->mb.plane, cm->lf.filter_level,
                                          0, 0, pbi->tile_workers, pbi->num_tile_workers,
                                          &pbi->lf_row_sync);
             }
-            /* NEMO: up-scale intra-block or residual of inter-block */
-            if (cm->nemo_cfg->decode_mode == DECODE_CACHE) upscale_block_by_bilinear_interp_mt(pbi);
+            /* PALANTIR: up-scale intra-block or residual of inter-block */
+            if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) upscale_block_by_bilinear_interp_mt(pbi);
         } else {
             vpx_internal_error(&cm->error, VPX_CODEC_CORRUPT_FRAME,
                                "Decode failed. Frame data is corrupted.");
         }
     } else {
         *p_data_end = decode_tiles(pbi, data + first_partition_size, data_end);
-        /* NEMO: up-scale intra-block or residual of inter-block */
-        if (cm->nemo_cfg->decode_mode == DECODE_CACHE) upscale_block_by_bilinear_interp(pbi);
+        /* PALANTIR: up-scale intra-block or residual of inter-block */
+        if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE || cm->palantir_cfg->decode_mode == DECODE_SR) {
+            upscale_block_by_bilinear_interp(pbi);
+        }
     }
 
-    /* NEMO: apply a DNN to anchor points*/
-    if (cm->apply_dnn) {
-        switch (cm->nemo_cfg->dnn_mode) {
-            case ONLINE_DNN:
+    /* PALANTIR: apply a DNN to anchor points*/
+    if (cm->frame_apply_dnn) {
+        switch (cm->palantir_cfg->dnn_mode) {
+            case ONLINE_DNN:                
                 upscale_frame_by_online_dnn(cm);
                 break;
             case OFFLINE_DNN:

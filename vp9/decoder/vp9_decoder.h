@@ -38,7 +38,7 @@ typedef struct TileBuffer {
 
 typedef struct TileWorkerData {
     const uint8_t *data_end;
-    nemo_worker_data_t *nemo_worker_data;
+    palantir_worker_data_t *palantir_worker_data;
     int buf_start, buf_end;  // pbi->tile_buffers to decode, inclusive
     vpx_reader bit_reader;
     FRAME_COUNTS counts;
@@ -78,7 +78,7 @@ typedef struct VP9Decoder {
   int need_resync;   // wait for key/intra-only frame.
   int hold_ref_buf;  // hold the reference buffer.
 
-    nemo_worker_data_t *nemo_worker_data; // NEMO
+    palantir_worker_data_t *palantir_worker_data; // PALANTIR
 } VP9Decoder;
 
 int vp9_receive_compressed_data(struct VP9Decoder *pbi, size_t size,
@@ -129,7 +129,7 @@ static INLINE void decrease_ref_count(int idx, RefCntBuffer *const frame_bufs,
         frame_bufs[idx].raw_frame_buffer.priv) {
 
       pool->release_fb_cb(pool->cb_priv, &frame_bufs[idx].raw_frame_buffer);
-      if (pool->mode == DECODE_CACHE || pool->mode == DECODE_SR) {
+      if (pool->mode == DECODE_CACHE || pool->mode == DECODE_BLOCK_CACHE || pool->mode == DECODE_SR) {
 
         pool->release_fb_cb(pool->cb_priv, &frame_bufs[idx].raw_sr_frame_buffer);
       }

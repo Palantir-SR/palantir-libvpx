@@ -128,7 +128,7 @@ struct macroblockd_plane {
   ENTROPY_CONTEXT *left_context;
   int16_t seg_dequant[MAX_SEGMENTS][2];
 
-  /* NEMO: new variables */
+  /* PALANTIR: new variables */
     struct buf_2d sr; //used for generating super-resolutioned cached frame
     struct buf_2d residual; //used for resizing lr_resiudal frame
     struct buf_2d input;

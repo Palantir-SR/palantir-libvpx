@@ -55,6 +55,8 @@ API_SRCS-$(CONFIG_SNPE) += snpe/LoadContainer.cpp
 API_SRCS-$(CONFIG_SNPE) += snpe/LoadContainer.hpp
 API_SRCS-$(CONFIG_SNPE) += snpe/LoadInputTensor.cpp
 API_SRCS-$(CONFIG_SNPE) += snpe/LoadInputTensor.hpp
+API_SRCS-$(CONFIG_SNPE) += snpe/LoadUDOPackage.cpp
+API_SRCS-$(CONFIG_SNPE) += snpe/LoadUDOPackage.hpp
 API_SRCS-$(CONFIG_SNPE) += snpe/NV21Load.cpp
 API_SRCS-$(CONFIG_SNPE) += snpe/NV21Load.hpp
 API_SRCS-$(CONFIG_SNPE) += snpe/PreprocessInput.cpp
@@ -70,5 +72,5 @@ API_SRCS-$(CONFIG_SNPE) += snpe/udlExample.hpp
 API_SRCS-$(CONFIG_SNPE) += snpe/main.cpp
 API_SRCS-$(CONFIG_SNPE) += snpe/main.hpp
 
-API_SRCS-yes += vpx_nemo.h
-API_SRCS-yes += src/vpx_nemo.c
+API_SRCS-yes += vpx_palantir.h
+API_SRCS-yes += src/vpx_palantir.c

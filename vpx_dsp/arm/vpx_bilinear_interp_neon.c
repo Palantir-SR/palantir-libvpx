@@ -29,7 +29,7 @@
 static void vpx_bilinear_interp_horiz_c_uint8(const uint8_t *src, ptrdiff_t src_stride,
                                               int16_t *dst, ptrdiff_t dst_stride, int width,
                                               int height, int scale,
-                                              const nemo_bilinear_coeff_t *config) {
+                                              const palantir_bilinear_coeff_t *config) {
     int x, y;
 
     /*
@@ -68,7 +68,7 @@ static void vpx_bilinear_interp_horiz_c_uint8(const uint8_t *src, ptrdiff_t src_
 static void vpx_bilinear_interp_horiz_c_int16(const int16_t *src, ptrdiff_t src_stride,
                                               int16_t *dst, ptrdiff_t dst_stride, int width,
                                               int height, int scale,
-                                              const nemo_bilinear_coeff_t *config) {
+                                              const palantir_bilinear_coeff_t *config) {
     int x, y;
 
     /*
@@ -109,7 +109,7 @@ static void vpx_bilinear_interp_horiz_c_int16(const int16_t *src, ptrdiff_t src_
 static void
 vpx_bilinear_interp_vert_neon_w8_uint8(const int16_t *src, ptrdiff_t src_stride, uint8_t *dst,
                                        ptrdiff_t dst_stride, int width, int height, int scale,
-                                       const nemo_bilinear_coeff_t *config) {
+                                       const palantir_bilinear_coeff_t *config) {
     int x, y;
 
     int16x8_t qS0_01234567_0, qS1_01234567_0;
@@ -190,7 +190,7 @@ vpx_bilinear_interp_vert_neon_w8_uint8(const int16_t *src, ptrdiff_t src_stride,
 static void
 vpx_bilinear_interp_vert_neon_w16_uint8(const int16_t *src, ptrdiff_t src_stride, uint8_t *dst,
                                         ptrdiff_t dst_stride, int width, int height, int scale,
-                                        const nemo_bilinear_coeff_t *config) {
+                                        const palantir_bilinear_coeff_t *config) {
     int x, y;
 
     int16x8_t qS0_01234567_0, qS0_01234567_1, qS1_01234567_0, qS1_01234567_1;
@@ -250,7 +250,7 @@ vpx_bilinear_interp_vert_neon_w16_uint8(const int16_t *src, ptrdiff_t src_stride
 static void
 vpx_bilinear_interp_vert_neon_w8_int16(const int16_t *src, ptrdiff_t src_stride, uint8_t *dst,
                                        ptrdiff_t dst_stride, int width, int height, int scale,
-                                       const nemo_bilinear_coeff_t *config) {
+                                       const palantir_bilinear_coeff_t *config) {
     //fprintf(stderr, "%s: Not tested yet", __func__);
     //assert(1);
 
@@ -321,7 +321,7 @@ vpx_bilinear_interp_vert_neon_w8_int16(const int16_t *src, ptrdiff_t src_stride,
 static void
 vpx_bilinear_interp_vert_neon_w16_int16(const int16_t *src, ptrdiff_t src_stride, uint8_t *dst,
                                         ptrdiff_t dst_stride, int width, int height, int scale,
-                                        const nemo_bilinear_coeff_t *config) {
+                                        const palantir_bilinear_coeff_t *config) {
     int x, y;
 
     int16x8_t qS0_01234567_0, qS0_01234567_1, qS1_01234567_0, qS1_01234567_1;
@@ -398,7 +398,7 @@ vpx_bilinear_interp_vert_neon_w16_int16(const int16_t *src, ptrdiff_t src_stride
 
 void vpx_bilinear_interp_int16_neon(const int16_t *src, ptrdiff_t src_stride, uint8_t *dst,
                                     ptrdiff_t dst_stride, int x_offset, int y_offset, int width,
-                                    int height, int scale, const nemo_bilinear_coeff_t *config) {
+                                    int height, int scale, const palantir_bilinear_coeff_t *config) {
     int16_t temp[256 * 256];
     int h = height * scale;
 
@@ -421,7 +421,7 @@ void vpx_bilinear_interp_int16_neon(const int16_t *src, ptrdiff_t src_stride, ui
 
 void vpx_bilinear_interp_uint8_neon(const uint8_t *src, ptrdiff_t src_stride, uint8_t *dst,
                                     ptrdiff_t dst_stride, int x_offset, int y_offset, int width,
-                                    int height, int scale, const nemo_bilinear_coeff_t *config) {
+                                    int height, int scale, const palantir_bilinear_coeff_t *config) {
     int16_t temp[128 * 128];
     int h = height * scale;
 

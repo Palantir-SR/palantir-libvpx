@@ -49,7 +49,7 @@ typedef struct yv12_buffer_config {
   uint8_t *v_buffer;
   uint8_t *alpha_buffer;
 
-  /* NEMO: buffer for residual */
+  /* PALANTIR: buffer for residual */
   int16_t *y_residual;
   int16_t *u_residual;
   int16_t *v_residual;

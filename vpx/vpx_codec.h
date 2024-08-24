@@ -139,7 +139,7 @@ typedef enum {
    */
   VPX_CODEC_LIST_END,
 
-  VPX_NEMO_ERROR,
+  VPX_PALANTIR_ERROR,
 } vpx_codec_err_t;
 
 /*! \brief Codec capabilities bitfield

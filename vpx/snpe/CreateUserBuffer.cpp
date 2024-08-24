@@ -1,6 +1,6 @@
 //==============================================================================
 //
-//  Copyright (c) 2017-2019 Qualcomm Technologies, Inc.
+//  Copyright (c) 2017-2021 Qualcomm Technologies, Inc.
 //  All Rights Reserved.
 //  Confidential and Proprietary - Qualcomm Technologies, Inc.
 //
@@ -29,7 +29,9 @@ void createUserBuffer(zdl::DlSystem::UserBufferMap& userBufferMap,
                       std::vector<std::unique_ptr<zdl::DlSystem::IUserBuffer>>& snpeUserBackedBuffers,
                       std::unique_ptr<zdl::SNPE::SNPE>& snpe,
                       const char * name,
-                      const bool isTf8Buffer)
+                      const bool isTfNBuffer,
+                      bool staticQuantization,
+                      int bitWidth)
 {
    // get attributes of buffer by name
    auto bufferAttributesOpt = snpe->getInputOutputBufferAttributes(name);
@@ -38,12 +40,20 @@ void createUserBuffer(zdl::DlSystem::UserBufferMap& userBufferMap,
    // calculate the size of buffer required by the input tensor
    const zdl::DlSystem::TensorShape& bufferShape = (*bufferAttributesOpt)->getDims();
 
+    size_t bufferElementSize = 0;
+    if (isTfNBuffer) {
+        bufferElementSize = bitWidth / 8;
+    }
+    else {
+        bufferElementSize = sizeof(float);
+    }
+
    // Calculate the stride based on buffer strides.
    // Note: Strides = Number of bytes to advance to the next element in each dimension.
    // For example, if a float tensor of dimension 2x4x3 is tightly packed in a buffer of 96 bytes, then the strides would be (48,12,4)
    // Note: Buffer stride is usually known and does not need to be calculated.
    std::vector<size_t> strides(bufferShape.rank());
-   strides[strides.size() - 1] = isTf8Buffer ? sizeof(uint8_t) : sizeof(float);
+   strides[strides.size() - 1] = bufferElementSize;
    size_t stride = strides[strides.size() - 1];
    for (size_t i = bufferShape.rank() - 1; i > 0; i--)
    {
@@ -51,14 +61,21 @@ void createUserBuffer(zdl::DlSystem::UserBufferMap& userBufferMap,
       strides[i-1] = stride;
    }
 
-   const size_t bufferElementSize = isTf8Buffer ? sizeof(uint8_t) : sizeof(float);
    size_t bufSize = calcSizeFromDims(bufferShape.getDimensions(), bufferShape.rank(), bufferElementSize);
 
    // set the buffer encoding type
    std::unique_ptr<zdl::DlSystem::UserBufferEncoding> userBufferEncoding;
-   if (bufferElementSize == sizeof(uint8_t))
+   if (isTfNBuffer)
    {
-      userBufferEncoding = std::unique_ptr<zdl::DlSystem::UserBufferEncodingTf8>(new zdl::DlSystem::UserBufferEncodingTf8(0,1.0));
+      if((*bufferAttributesOpt)->getEncodingType() == zdl::DlSystem::UserBufferEncoding::ElementType_t::FLOAT && staticQuantization){
+         std::cerr << "ERROR: Quantization parameters not present in model" << std::endl;
+         std::exit(EXIT_FAILURE);
+      }
+
+      const zdl::DlSystem::UserBufferEncodingTfN* ubeTfN = dynamic_cast<const zdl::DlSystem::UserBufferEncodingTfN*>((*bufferAttributesOpt)->getEncoding());
+      uint64_t stepEquivalentTo0 = ubeTfN->getStepExactly0();
+      float quantizedStepSize = ubeTfN->getQuantizedStepSize();
+      userBufferEncoding = std::unique_ptr<zdl::DlSystem::UserBufferEncodingTfN>(new zdl::DlSystem::UserBufferEncodingTfN(stepEquivalentTo0,quantizedStepSize, bitWidth));
    }
    else
    {
@@ -86,7 +103,9 @@ void createInputBufferMap(zdl::DlSystem::UserBufferMap& inputMap,
                           std::unordered_map<std::string, std::vector<uint8_t>>& applicationBuffers,
                           std::vector<std::unique_ptr<zdl::DlSystem::IUserBuffer>>& snpeUserBackedBuffers,
                           std::unique_ptr<zdl::SNPE::SNPE>& snpe,
-                          bool isTf8Buffer)
+                          bool isTfNBuffer,
+                          bool staticQuantization,
+                          int bitWidth)
 {
    // get input tensor names of the network that need to be populated
    const auto& inputNamesOpt = snpe->getInputTensorNames();
@@ -96,7 +115,7 @@ void createInputBufferMap(zdl::DlSystem::UserBufferMap& inputMap,
 
    // create SNPE user buffers for each application storage buffer
    for (const char *name : inputNames) {
-      createUserBuffer(inputMap, applicationBuffers, snpeUserBackedBuffers, snpe, name, isTf8Buffer);
+      createUserBuffer(inputMap, applicationBuffers, snpeUserBackedBuffers, snpe, name, isTfNBuffer, staticQuantization, bitWidth);
    }
 }
 
@@ -104,7 +123,8 @@ void createOutputBufferMap(zdl::DlSystem::UserBufferMap& outputMap,
                            std::unordered_map<std::string, std::vector<uint8_t>>& applicationBuffers,
                            std::vector<std::unique_ptr<zdl::DlSystem::IUserBuffer>>& snpeUserBackedBuffers,
                            std::unique_ptr<zdl::SNPE::SNPE>& snpe,
-                           bool isTf8Buffer)
+                           bool isTfNBuffer,
+                           int bitWidth)
 {
    // get input tensor names of the network that need to be populated
    const auto& outputNamesOpt = snpe->getOutputTensorNames();
@@ -113,7 +133,7 @@ void createOutputBufferMap(zdl::DlSystem::UserBufferMap& outputMap,
 
    // create SNPE user buffers for each application storage buffer
    for (const char *name : outputNames) {
-      createUserBuffer(outputMap, applicationBuffers, snpeUserBackedBuffers, snpe, name, isTf8Buffer);
+      createUserBuffer(outputMap, applicationBuffers, snpeUserBackedBuffers, snpe, name, isTfNBuffer, false, bitWidth);
    }
 }
 

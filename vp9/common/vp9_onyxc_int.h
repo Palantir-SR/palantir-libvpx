@@ -11,7 +11,7 @@
 #ifndef VP9_COMMON_VP9_ONYXC_INT_H_
 #define VP9_COMMON_VP9_ONYXC_INT_H_
 
-#include <vpx/vpx_nemo.h>
+#include <vpx/vpx_palantir.h>
 
 #include "./vpx_config.h"
 #include "vpx/internal/vpx_codec_internal.h"
@@ -76,7 +76,7 @@ typedef struct {
     vpx_codec_frame_buffer_t raw_sr_frame_buffer;
     YV12_BUFFER_CONFIG buf;
 
-    /* NEMO: new variables */
+    /* PALANTIR: new variables */
     YV12_BUFFER_CONFIG sr_buf;
     int current_video_frame;
     int current_super_frame;
@@ -96,7 +96,7 @@ typedef struct BufferPool {
     InternalFrameBufferList int_frame_buffers;
 } BufferPool;
 
-//TODO (NEMO): declare SNPE variable inside this structure
+//TODO (PALANTIR): declare SNPE variable inside this structure
 typedef struct VP9Common {
     struct vpx_internal_error_info error;
     vpx_color_space_t color_space;
@@ -120,18 +120,20 @@ typedef struct VP9Common {
 
     struct scale_factors sf;
 
-    /* NEMO: Variables for applying or caching DNN */
-    nemo_cfg_t *nemo_cfg;
+    /* PALANTIR: Variables for applying or caching DNN */
+    palantir_cfg_t *palantir_cfg;
     struct scale_factors sf_upsample_inter;
     int scale;
-    int apply_dnn;
+    int frame_apply_dnn;
 
-    /* NEMO: Variables for logging */
-    nemo_latency_t latency;
-    nemo_metdata_t metadata;
+    /* PALANTIR: Variables for logging */
+    palantir_latency_t latency;
+    palantir_metdata_t metadata;
     FILE *quality_log;
     FILE *latency_log;
     FILE *metadata_log;
+    FILE *finegrained_metadata_log;
+    FILE *super_finegrained_metadata_log;
     YV12_BUFFER_CONFIG *yv12_input_frame;
     YV12_BUFFER_CONFIG *yv12_reference_frame;
     RGB24_BUFFER_CONFIG *rgb24_input_frame;

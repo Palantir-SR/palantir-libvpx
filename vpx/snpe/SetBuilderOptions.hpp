@@ -1,6 +1,6 @@
 //==============================================================================
 //
-//  Copyright (c) 2017-2019 Qualcomm Technologies, Inc.
+//  Copyright (c) 2017-2021 Qualcomm Technologies, Inc.
 //  All Rights Reserved.
 //  Confidential and Proprietary - Qualcomm Technologies, Inc.
 //
@@ -23,5 +23,13 @@ std::unique_ptr<zdl::SNPE::SNPE> setBuilderOptions(std::unique_ptr<zdl::DlContai
                                                    bool useUserSuppliedBuffers,
                                                    zdl::DlSystem::PlatformConfig platformConfig,
                                                    bool useCaching);
+
+std::unique_ptr<zdl::SNPE::SNPE> setBuilderOptions2(std::unique_ptr<zdl::DlContainer::IDlContainer> & container,
+                                                   zdl::DlSystem::Runtime_t runtime,
+                                                   zdl::DlSystem::RuntimeList runtimeList,
+                                                   zdl::DlSystem::UDLBundle udlBundle,
+                                                   bool useUserSuppliedBuffers,
+                                                   zdl::DlSystem::PlatformConfig platformConfig,
+                                                   bool useCaching, const int width, const int height);
 
 #endif //SETBUILDEROPTIONS_H

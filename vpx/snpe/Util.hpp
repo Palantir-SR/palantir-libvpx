@@ -1,6 +1,6 @@
 //==============================================================================
 //
-//  Copyright (c) 2017-2019 Qualcomm Technologies, Inc.
+//  Copyright (c) 2017-2021 Qualcomm Technologies, Inc.
 //  All Rights Reserved.
 //  Confidential and Proprietary - Qualcomm Technologies, Inc.
 //
@@ -39,15 +39,15 @@ template<typename T> bool loadByteDataFile(const std::string& inputFile, std::ve
 std::vector<unsigned char> loadByteDataFileBatched(const std::string& inputFile);
 template<typename T> bool loadByteDataFileBatched(const std::string& inputFile, std::vector<T>& loadVector, size_t offset);
 bool loadByteDataFileBatchedTf8(const std::string& inputFile, std::vector<uint8_t>& loadVector, size_t offset);
-bool loadByteDataFileBatchedTf8(const std::string& inputFile, std::vector<uint8_t>& loadVector, size_t offset, unsigned char& stepEquivalentTo0, float& quantizedStepSize );
-
+bool loadByteDataFileBatchedTfN(const std::string& inputFile, std::vector<uint8_t>& loadVector, size_t offset,
+                                unsigned char& stepEquivalentTo0, float& quantizedStepSize, bool staticQuantization, int bitWidth);
 
 bool SaveITensorBatched(const std::string& path, const zdl::DlSystem::ITensor* tensor, size_t batchIndex=0, size_t batchChunk=0);
 bool SaveUserBufferBatched(const std::string& path, const std::vector<uint8_t>& buffer, size_t batchIndex=0, size_t batchChunk=0);
 bool EnsureDirectory(const std::string& dir);
 
-void Tf8ToFloat(float *out, uint8_t *in, const unsigned char stepEquivalentTo0, const float quantizedStepSize, size_t numElement);
-bool FloatToTf8(uint8_t* out, unsigned char& stepEquivalentTo0, float& quantizedStepSize, float* in, size_t numElement);
+void TfNToFloat(float *out, uint8_t *in, const unsigned char stepEquivalentTo0, const float quantizedStepSize, size_t numElement, int bitWidth);
+bool FloatToTfN(uint8_t* out, unsigned char& stepEquivalentTo0, float& quantizedStepSize, bool staticQuantization, float* in, size_t numElement, int bitWidth);
 
 void setResizableDim(size_t resizableDim);
 size_t getResizableDim();

@@ -70,7 +70,7 @@ void vp9_free_ref_frame_buffers(BufferPool *pool)
         if (!pool->frame_bufs[i].released && pool->frame_bufs[i].raw_frame_buffer.data != NULL)
         {
             pool->release_fb_cb(pool->cb_priv, &pool->frame_bufs[i].raw_frame_buffer);
-            if (pool->mode == DECODE_CACHE || pool->mode == DECODE_SR)
+            if (pool->mode == DECODE_CACHE || pool->mode == DECODE_BLOCK_CACHE || pool->mode == DECODE_SR)
             {
                 pool->release_fb_cb(pool->cb_priv, &pool->frame_bufs[i].raw_sr_frame_buffer);
             }
@@ -80,7 +80,7 @@ void vp9_free_ref_frame_buffers(BufferPool *pool)
         vpx_free(pool->frame_bufs[i].mvs);
         pool->frame_bufs[i].mvs = NULL;
         vpx_free_frame_buffer(&pool->frame_bufs[i].buf);
-        if (pool->mode == DECODE_CACHE || pool->mode == DECODE_SR)
+        if (pool->mode == DECODE_CACHE || pool->mode == DECODE_BLOCK_CACHE || pool->mode == DECODE_SR)
         {
             vpx_free_frame_buffer(&pool->frame_bufs[i].sr_buf);
         }

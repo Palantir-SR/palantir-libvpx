@@ -266,15 +266,18 @@ typedef vpx_image_t *(*vpx_codec_get_preview_frame_fn_t)(
 typedef vpx_codec_err_t (*vpx_codec_enc_mr_get_mem_loc_fn_t)(
     const vpx_codec_enc_cfg_t *cfg, void **mem_loc);
 
-/* NEMO: new SR-integrated codec interfaces */
-typedef vpx_codec_err_t (*nemo_load_cfg_fn_t)(
-        vpx_codec_alg_priv_t *ctx, nemo_cfg_t *nemo_cfg);
+/* PALANTIR: new SR-integrated codec interfaces */
+typedef vpx_codec_err_t (*palantir_load_cfg_fn_t)(
+        vpx_codec_alg_priv_t *ctx, palantir_cfg_t *palantir_cfg);
 
-typedef vpx_codec_err_t (*nemo_load_dnn_fn_t)(
+typedef vpx_codec_err_t (*palantir_load_dnn_fn_t)(
         vpx_codec_alg_priv_t *ctx, int scale, const char *dnn_path);
 
-typedef vpx_codec_err_t (*nemo_load_cache_profile_fn_t)(
-        vpx_codec_alg_priv_t *ctx, int scale, const char *cache_profile_path);
+typedef vpx_codec_err_t (*palantir_load_cache_profile_fn_t)(
+        vpx_codec_alg_priv_t *ctx, int scale, const char *cache_profile_path, int num_patches_per_row, int num_patches_per_column);
+
+typedef vpx_codec_err_t (*palantir_init_dependency_graph_t)(
+        vpx_codec_alg_priv_t *ctx, int num_patches_per_row, int num_patches_per_column);
 
 /*!\brief usage configuration mapping
  *
@@ -326,12 +329,13 @@ struct vpx_codec_iface {
     vpx_codec_enc_mr_get_mem_loc_fn_t
         mr_get_mem_loc; /**< \copydoc ::vpx_codec_enc_mr_get_mem_loc_fn_t */
   } enc;
-    /* NEMO: new SR-integrated codec interfaces */
-    struct nemo_iface {
-        nemo_load_cfg_fn_t load_cfg;
-        nemo_load_dnn_fn_t load_dnn;
-        nemo_load_cache_profile_fn_t load_cache_profile;
-  } nemo;
+    /* PALANTIR: new SR-integrated codec interfaces */
+    struct palantir_iface {
+        palantir_load_cfg_fn_t load_cfg;
+        palantir_load_dnn_fn_t load_dnn;
+        palantir_load_cache_profile_fn_t load_cache_profile;
+        palantir_init_dependency_graph_t init_dependency_graph;
+  } palantir;
 };
 
 /*!\brief Callback function pointer / user data pair storage */

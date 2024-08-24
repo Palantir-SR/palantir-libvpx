@@ -33,7 +33,7 @@ extern "C" {
 #include <math.h>
 #include "./vpx_codec.h"
 #include "./vpx_frame_buffer.h"
-#include "vpx_nemo.h"
+#include "vpx_palantir.h"
 
 /*!\brief Current ABI version number
  *
@@ -363,11 +363,13 @@ vpx_codec_err_t vpx_codec_set_frame_buffer_functions(
 
 /*!@} - end defgroup decoder*/
 
-vpx_codec_err_t vpx_load_nemo_cfg(vpx_codec_ctx_t *ctx, nemo_cfg_t *nemo_cfg);
+vpx_codec_err_t vpx_load_palantir_cfg(vpx_codec_ctx_t *ctx, palantir_cfg_t *palantir_cfg);
 
-vpx_codec_err_t vpx_load_nemo_dnn(vpx_codec_ctx_t *ctx, int, const char *);
+vpx_codec_err_t vpx_load_palantir_dnn(vpx_codec_ctx_t *ctx, int, const char *);
 
-vpx_codec_err_t vpx_load_nemo_cache_profile(vpx_codec_ctx_t *ctx, int, const char *);
+vpx_codec_err_t vpx_load_palantir_cache_profile(vpx_codec_ctx_t *ctx, int, const char *, int, int);
+
+vpx_codec_err_t vpx_init_palantir_dependeny_graph(vpx_codec_ctx_t *ctx, int, int);
 
 #ifdef __cplusplus
 }

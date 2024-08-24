@@ -1,6 +1,6 @@
 //==============================================================================
 //
-//  Copyright (c) 2017-2019 Qualcomm Technologies, Inc.
+//  Copyright (c) 2017-2021 Qualcomm Technologies, Inc.
 //  All Rights Reserved.
 //  Confidential and Proprietary - Qualcomm Technologies, Inc.
 //
@@ -155,84 +155,120 @@ bool loadByteDataFileBatched(const std::string& inputFile, std::vector<T>& loadV
     return true;
 }
 
-void Tf8ToFloat(float *out,
+void TfNToFloat(float *out,
                 uint8_t *in,
                 const unsigned char stepEquivalentTo0,
                 const float quantizedStepSize,
-                size_t numElement)
+                size_t numElement,
+                int bitWidth)
 {
    for (size_t i = 0; i < numElement; ++i) {
-      double quantizedValue = static_cast <double> (in[i]);
-      double stepEqTo0 = static_cast <double> (stepEquivalentTo0);
-      out[i] = static_cast <double> ((quantizedValue - stepEqTo0) * quantizedStepSize);
+       if (8 == bitWidth) {
+           double quantizedValue = static_cast <double> (in[i]);
+           double stepEqTo0 = static_cast <double> (stepEquivalentTo0);
+           out[i] = static_cast <double> ((quantizedValue - stepEqTo0) * quantizedStepSize);
+       }
+       else if (16 == bitWidth) {
+           uint16_t *temp = (uint16_t *)in;
+           double quantizedValue = static_cast <double> (temp[i]);
+           double stepEqTo0 = static_cast <double> (stepEquivalentTo0);
+           out[i] = static_cast <double> ((quantizedValue - stepEqTo0) * quantizedStepSize);
+       }
    }
 }
 
-bool FloatToTf8(uint8_t* out,
+bool FloatToTfN(uint8_t* out,
                 unsigned char& stepEquivalentTo0,
                 float& quantizedStepSize,
+                bool staticQuantization,
                 float* in,
-                size_t numElement)
+                size_t numElement,
+                int bitWidth)
 {
-   float trueMin = std::numeric_limits <float>::max();
-   float trueMax = std::numeric_limits <float>::min();
-
-   for (size_t i = 0; i < numElement; ++i) {
-      trueMin = fmin(trueMin, in[i]);
-      trueMax = fmax(trueMax, in[i]);
-   }
-
    double encodingMin;
    double encodingMax;
-   double stepCloseTo0;
+   double encodingRange;
+   double trueBitWidthMax = pow(2, bitWidth) -1;
 
-   if (trueMin > 0.0f) {
-      stepCloseTo0 = 0.0;
-      encodingMin = 0.0;
-      encodingMax = trueMax;
-   } else if (trueMax < 0.0f) {
-      stepCloseTo0 = 255.0;
-      encodingMin = trueMin;
-      encodingMax = 0.0;
-   } else {
-      double trueStepSize = static_cast <double>(trueMax - trueMin) / 255.0;
-      stepCloseTo0 = -trueMin / trueStepSize;
-      if (stepCloseTo0==round(stepCloseTo0)) {
-         // 0.0 is exactly representable
-         encodingMin = trueMin;
+   if (!staticQuantization) {
+      float trueMin = std::numeric_limits <float>::max();
+      float trueMax = std::numeric_limits <float>::min();
+
+      for (size_t i = 0; i < numElement; ++i) {
+         trueMin = fmin(trueMin, in[i]);
+         trueMax = fmax(trueMax, in[i]);
+      }
+
+      double stepCloseTo0;
+
+      if (trueMin > 0.0f) {
+         stepCloseTo0 = 0.0;
+         encodingMin = 0.0;
          encodingMax = trueMax;
+      } else if (trueMax < 0.0f) {
+         stepCloseTo0 = trueBitWidthMax;
+         encodingMin = trueMin;
+         encodingMax = 0.0;
       } else {
-         stepCloseTo0 = round(stepCloseTo0);
-         encodingMin = (0.0 - stepCloseTo0) * trueStepSize;
-         encodingMax = (255.0 - stepCloseTo0) * trueStepSize;
+         double trueStepSize = static_cast <double>(trueMax - trueMin) / trueBitWidthMax;
+         stepCloseTo0 = -trueMin / trueStepSize;
+         if (stepCloseTo0 == round(stepCloseTo0)) {
+            // 0.0 is exactly representable
+            encodingMin = trueMin;
+            encodingMax = trueMax;
+         } else {
+            stepCloseTo0 = round(stepCloseTo0);
+            encodingMin = (0.0 - stepCloseTo0) * trueStepSize;
+            encodingMax = (trueBitWidthMax - stepCloseTo0) * trueStepSize;
+         }
+      }
+
+      const double minEncodingRange = 0.01;
+      double encodingRange = encodingMax - encodingMin;
+      quantizedStepSize = encodingRange / trueBitWidthMax;
+      stepEquivalentTo0 = static_cast <unsigned char> (round(stepCloseTo0));
+
+      if (encodingRange < minEncodingRange) {
+         std::cerr << "Expect the encoding range to be larger than " << minEncodingRange << "\n"
+                   << "Got: " << encodingRange << "\n";
+         return false;
       }
    }
+   else
+   {
+      if (bitWidth == 8) {
+         encodingMin = (0 - static_cast <uint8_t> (stepEquivalentTo0)) * quantizedStepSize;
+      } else if (bitWidth == 16) {
+         encodingMin = (0 - static_cast <uint16_t> (stepEquivalentTo0)) * quantizedStepSize;
+      } else {
+         std::cerr << "Quantization bitWidth is invalid " << std::endl;
+         return false;
+      }
+      encodingMax = (trueBitWidthMax - stepEquivalentTo0) * quantizedStepSize;
+      encodingRange = encodingMax - encodingMin;
+   }
 
-   const double minEncodingRange = 0.01;
-   double encodingRange = encodingMax - encodingMin;
-   quantizedStepSize = encodingRange / 255.0;
-   stepEquivalentTo0 = static_cast <unsigned char> (round(stepCloseTo0));
+   for (size_t i = 0; i < numElement; ++i) {
+      int quantizedValue = round(trueBitWidthMax * (in[i] - encodingMin) / encodingRange);
 
-   if (encodingRange < minEncodingRange) {
-      std::cerr << "Expect the encoding range to be larger than " <<  minEncodingRange << "\n"
-                << "Got: " << encodingRange << "\n";
-      return false;
-   } else {
-      for (size_t i = 0; i < numElement; ++i) {
-         int quantizedValue = round(255.0 * (in[i] - encodingMin) / encodingRange);
+      if (quantizedValue < 0)
+         quantizedValue = 0;
+      else if (quantizedValue > (int)trueBitWidthMax)
+         quantizedValue = (int)trueBitWidthMax;
 
-         if (quantizedValue < 0)
-            quantizedValue = 0;
-         else if (quantizedValue > 255)
-            quantizedValue = 255;
-
+      if(bitWidth == 8){
          out[i] = static_cast <uint8_t> (quantizedValue);
+      }
+      else if(bitWidth == 16){
+         uint16_t *temp = (uint16_t *)out;
+         temp[i] = static_cast <uint16_t> (quantizedValue);
       }
    }
    return true;
 }
 
-bool loadByteDataFileBatchedTf8(const std::string& inputFile, std::vector<uint8_t>& loadVector, size_t offset, unsigned char& stepEquivalentTo0, float& quantizedStepSize)
+bool loadByteDataFileBatchedTfN(const std::string& inputFile, std::vector<uint8_t>& loadVector, size_t offset,
+                                unsigned char& stepEquivalentTo0, float& quantizedStepSize, bool staticQuantization, int bitWidth)
 {
    std::ifstream in(inputFile, std::ifstream::binary);
    std::vector<float> inVector;
@@ -256,14 +292,14 @@ bool loadByteDataFileBatchedTf8(const std::string& inputFile, std::vector<uint8_
    {
       std::cerr << "Failed to read the contents of: " << inputFile << "\n";
    }
-   size_t dataStartPos = offset * length/ sizeof(float);
-   if(!FloatToTf8(&loadVector[dataStartPos], stepEquivalentTo0, quantizedStepSize, inVector.data(), inVector.size()))
+   int elementSize = bitWidth / 8;
+   size_t dataStartPos = (offset * length * elementSize) / sizeof(float);
+   if(!FloatToTfN(&loadVector[dataStartPos], stepEquivalentTo0, quantizedStepSize, staticQuantization, inVector.data(), inVector.size(), bitWidth))
    {
      return false;
    }
    return true;
 }
-
 
 bool loadByteDataFileBatchedTf8(const std::string& inputFile, std::vector<uint8_t>& loadVector, size_t offset)
 {
@@ -292,7 +328,7 @@ bool loadByteDataFileBatchedTf8(const std::string& inputFile, std::vector<uint8_
 
    unsigned char stepEquivalentTo0;
    float quantizedStepSize;
-   if(!FloatToTf8(loadVector.data(), stepEquivalentTo0, quantizedStepSize, inVector.data(), loadVector.size()))
+   if(!FloatToTfN(loadVector.data(), stepEquivalentTo0, quantizedStepSize, false, inVector.data(), loadVector.size(), 8))
    {
        return false;
    }

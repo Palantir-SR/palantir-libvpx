@@ -1,6 +1,6 @@
 //==============================================================================
 //
-//  Copyright (c) 2019 Qualcomm Technologies, Inc.
+//  Copyright (c) 2019-2020 Qualcomm Technologies, Inc.
 //  All Rights Reserved.
 //  Confidential and Proprietary - Qualcomm Technologies, Inc.
 //
@@ -19,7 +19,6 @@
 
 void saveOutputToBuffer(zdl::DlSystem::TensorMap outputTensorMap, float * buffer);
 
-
 // Save output implementation of ITensor
 bool saveOutput (zdl::DlSystem::TensorMap outputTensorMap,
                  const std::string& outputDir,
@@ -32,7 +31,8 @@ bool saveOutput (zdl::DlSystem::UserBufferMap& outputMap,
                  const std::string& outputDir,
                  int num,
                  size_t batchSize,
-                 bool isTf8Buffer);
+                 bool isTfNBuffer,
+                 int bitWidth);
 
 
 

@@ -42,7 +42,6 @@
 #include "vp9/decoder/vp9_detokenize.h"
 
 #include <vpx_dsp/psnr.h>
-#include <vpx/snpe/main.hpp>
 #ifdef __ANDROID_API__
 #include <android/log.h>
 #endif
@@ -127,12 +126,12 @@ VP9Decoder *vp9_decoder_create(BufferPool *const pool) {
 
     vpx_get_worker_interface()->init(&pbi->lf_worker);
 
-    /* NEMO: initialize variables */
-    pbi->nemo_worker_data = NULL;
+    /* PALANTIR: initialize variables */
+    pbi->palantir_worker_data = NULL;
     cm->quality_log = NULL;
     cm->latency_log = NULL;
     cm->metadata_log = NULL;
-    cm->nemo_cfg = NULL;
+    cm->palantir_cfg = NULL;
     cm->yv12_input_frame = NULL;
     cm->yv12_reference_frame = NULL;
     cm->rgb24_input_frame = NULL;
@@ -163,7 +162,7 @@ void vp9_decoder_remove(VP9Decoder *pbi) {
         vp9_loop_filter_dealloc(&pbi->lf_row_sync);
     }
 
-    /* NEMO: free frames used for quality measurements */
+    /* PALANTIR: free frames used for quality measurements */
     vpx_free_frame_buffer(pbi->common.yv12_input_frame);
     vpx_free_frame_buffer(pbi->common.yv12_reference_frame);
     vpx_free(pbi->common.yv12_input_frame);
@@ -177,14 +176,16 @@ void vp9_decoder_remove(VP9Decoder *pbi) {
     vpx_free(pbi->common.rgb24_input_tensor);
     vpx_free(pbi->common.rgb24_sr_tensor);
 
-    /* NEMO: close log files */
+    /* PALANTIR: close log files */
     if (pbi->common.quality_log != NULL) fclose(pbi->common.quality_log);
     if (pbi->common.latency_log != NULL) fclose(pbi->common.latency_log);
     if (pbi->common.metadata_log != NULL) fclose(pbi->common.metadata_log);
+    if (pbi->common.super_finegrained_metadata_log != NULL) fclose(pbi->common.super_finegrained_metadata_log);
+    if (pbi->common.finegrained_metadata_log != NULL) fclose(pbi->common.finegrained_metadata_log);
 
-    /* NEMO: free workers */
+    /* PALANTIR: free workers */
     const int num_threads = (pbi->max_threads > 1) ? pbi->max_threads : 1;
-    remove_nemo_worker(pbi->nemo_worker_data, num_threads);
+    remove_palantir_worker(pbi->palantir_worker_data, num_threads);
 
     vp9_remove_common(&pbi->common);
     vpx_free(pbi);
@@ -298,7 +299,7 @@ static void swap_frame_buffers(VP9Decoder *pbi) {
         cm->ref_frame_map[ref_index] = cm->next_ref_frame_map[ref_index];
     }
     pbi->hold_ref_buf = 0;
-    if (cm->nemo_cfg->decode_mode == DECODE_CACHE || cm->nemo_cfg->decode_mode == DECODE_SR) {
+    if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE || cm->palantir_cfg->decode_mode == DECODE_SR) {
 //        cm->frame_to_show = get_frame_new_buffer(cm); //hyunho: cache mode or not
         cm->frame_to_show = get_sr_frame_new_buffer(cm); //hyunho: cache mode or not
 //        cm->frame_to_show = get_frame_new_buffer(cm); //hyunho: cache mode or not
@@ -346,7 +347,7 @@ int vp9_receive_compressed_data(VP9Decoder *pbi, size_t size,
         !frame_bufs[cm->new_fb_idx].released) {
         pool->release_fb_cb(pool->cb_priv,
                             &frame_bufs[cm->new_fb_idx].raw_frame_buffer);
-        if (pool->mode == DECODE_CACHE || pool->mode == DECODE_SR) {
+        if (pool->mode == DECODE_CACHE || pool->mode == DECODE_BLOCK_CACHE || pool->mode == DECODE_SR) {
 
             pool->release_fb_cb(pool->cb_priv,
                                 &frame_bufs[cm->new_fb_idx].raw_sr_frame_buffer);

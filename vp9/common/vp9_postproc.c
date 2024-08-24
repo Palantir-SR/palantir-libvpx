@@ -306,8 +306,8 @@ int vp9_post_proc_frame(struct VP9Common *cm, YV12_BUFFER_CONFIG *dest,
     return 0;
   }
 
-  if (cm->nemo_cfg->decode_mode == DECODE_SR || cm->nemo_cfg->decode_mode == DECODE_CACHE) {
-    fprintf(stderr, "%s is not implemented for DECODE_SR, DECODE_CACHE");
+  if (cm->palantir_cfg->decode_mode == DECODE_SR || cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
+    fprintf(stderr, "%s is not implemented for DECODE_SR, DECODE_CACHE, DECODE_BLOCK_CACHE");
     return -1;
   }
 

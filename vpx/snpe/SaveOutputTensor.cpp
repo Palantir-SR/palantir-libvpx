@@ -1,6 +1,6 @@
 //==============================================================================
 //
-//  Copyright (c) 2018-2019 Qualcomm Technologies, Inc.
+//  Copyright (c) 2018-2020 Qualcomm Technologies, Inc.
 //  All Rights Reserved.
 //  Confidential and Proprietary - Qualcomm Technologies, Inc.
 //
@@ -43,7 +43,7 @@
 #define LOGS(...) __android_log_print(_SILENT,TAG,__VA_ARGS__)
 #endif
 
-/*** NEMO ***/
+/*** PALANTIR ***/
 void saveOutputToBuffer(zdl::DlSystem::TensorMap outputTensorMap, float * buffer){
     // Get all output tensor names from the network
     zdl::DlSystem::StringList tensorNames = outputTensorMap.getTensorNames();
@@ -58,8 +58,7 @@ void saveOutputToBuffer(zdl::DlSystem::TensorMap outputTensorMap, float * buffer
         memcpy(buffer, it.dataPointer(), batchChunk * sizeof(float)); // here causes free()
     });
 }
-/*** NEMO ***/
-
+/*** PALANTIR ***/
 
 // Print the results to raw files
 // ITensor
@@ -98,10 +97,13 @@ bool saveOutput (zdl::DlSystem::UserBufferMap& outputMap,
                  const std::string& outputDir,
                  int num,
                  size_t batchSize,
-                 bool isTf8Buffer)
+                 bool isTfNBuffer,
+                 int bitWidth)
 {
    // Get all output buffer names from the network
    const zdl::DlSystem::StringList& outputBufferNames = outputMap.getUserBufferNames();
+
+   int elementSize = bitWidth / 8;
 
    // Iterate through output buffers and print each output to a raw file
    for(auto& name : outputBufferNames)
@@ -121,13 +123,15 @@ bool saveOutput (zdl::DlSystem::UserBufferMap& outputMap,
                  std::cout << "\tAssign a larger buffer using a bigger -z argument" << std::endl;
               batchChunk = std::min(batchChunk,dataChunk);
            }
-           if (isTf8Buffer)
+           if (isTfNBuffer)
            {
               std::vector<uint8_t> output;
-              zdl::DlSystem::UserBufferEncodingTf8 ubetf8 = dynamic_cast<zdl::DlSystem::UserBufferEncodingTf8 &>(outputMap.getUserBuffer(name)->getEncoding());
-              output.resize(applicationOutputBuffers.at(name).size() * sizeof(float));
-              Tf8ToFloat(reinterpret_cast<float *>(&output[0]),applicationOutputBuffers.at(name).data(),ubetf8.getStepExactly0(),ubetf8.getQuantizedStepSize(),applicationOutputBuffers.at(name).size());
-              if(!SaveUserBufferBatched(path.str(), output, i, batchChunk * sizeof(float)))
+              zdl::DlSystem::UserBufferEncodingTfN ubetfN = dynamic_cast<zdl::DlSystem::UserBufferEncodingTfN &>(outputMap.getUserBuffer(name)->getEncoding());
+              output.resize(applicationOutputBuffers.at(name).size() * sizeof(float) / elementSize);
+              TfNToFloat(reinterpret_cast<float *>(&output[0]),applicationOutputBuffers.at(name).data(),
+                         ubetfN.getStepExactly0(),ubetfN.getQuantizedStepSize(),
+                        applicationOutputBuffers.at(name).size() / elementSize, bitWidth);
+              if(!SaveUserBufferBatched(path.str(), output, i, batchChunk * sizeof(float) / elementSize))
               {
                   return false;
               }

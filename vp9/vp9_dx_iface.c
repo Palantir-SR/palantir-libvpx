@@ -139,8 +139,8 @@ static vpx_codec_err_t decoder_destroy(vpx_codec_alg_priv_t *ctx) {
         vp9_free_internal_frame_buffers(&ctx->buffer_pool->int_frame_buffers);
     }
 
-    /* NEMO: free nemo_cfg */
-    remove_nemo_cfg(ctx->nemo_cfg);
+    /* PALANTIR: free palantir_cfg */
+    remove_palantir_cfg(ctx->palantir_cfg);
 
     vpx_free(ctx->buffer_pool);
     vpx_free(ctx);
@@ -298,7 +298,7 @@ static void init_buffer_callbacks(vpx_codec_alg_priv_t *ctx) {
         pool->cb_priv = &pool->int_frame_buffers;
     }
 
-    pool->mode = ctx->nemo_cfg->decode_mode;
+    pool->mode = ctx->palantir_cfg->decode_mode;
 }
 
 static void set_default_ppflags(vp8_postproc_cfg_t *cfg) {
@@ -314,42 +314,45 @@ static void set_ppflags(const vpx_codec_alg_priv_t *ctx, vp9_ppflags_t *flags) {
     flags->noise_level = ctx->postproc_cfg.noise_level;
 }
 
-static vpx_codec_err_t load_nemo_cfg(vpx_codec_alg_priv_t *ctx, nemo_cfg_t *nemo_cfg) {
-    ctx->nemo_cfg = init_nemo_cfg();
-    memcpy(ctx->nemo_cfg, nemo_cfg, sizeof(nemo_cfg_t));
+static vpx_codec_err_t load_palantir_cfg(vpx_codec_alg_priv_t *ctx, palantir_cfg_t *palantir_cfg) {
+    ctx->palantir_cfg = init_palantir_cfg();
+    memcpy(ctx->palantir_cfg, palantir_cfg, sizeof(palantir_cfg_t));
 
-    /* NEMO: check whether frames are prepared correctely */
-    if (ctx->nemo_cfg->save_quality) {
-        if (ctx->nemo_cfg->decode_mode == DECODE) {
-            if (!_exists(ctx->nemo_cfg->input_reference_frame_dir)) {
+    /* PALANTIR: check whether frames are prepared correctely */
+    if (ctx->palantir_cfg->save_quality) {
+        if (ctx->palantir_cfg->decode_mode == DECODE) {
+            if (!_exists(ctx->palantir_cfg->input_reference_frame_dir)) {
                 fprintf(stderr, "%s: Input reference frame dir does not exists\n", __func__);
-                return VPX_NEMO_ERROR;
+                return VPX_PALANTIR_ERROR;
             }
-        } else if (ctx->nemo_cfg->decode_mode == DECODE_SR ||
-                   ctx->nemo_cfg->decode_mode == DECODE_CACHE) {
-            if (!_exists(ctx->nemo_cfg->sr_reference_frame_dir)) {
-                fprintf(stderr, "%s: SR reference frame dir does not exists: %s\n", __func__, ctx->nemo_cfg->sr_reference_frame_dir);
-                return VPX_NEMO_ERROR;
+        } else if (ctx->palantir_cfg->decode_mode == DECODE_SR ||
+                   ctx->palantir_cfg->decode_mode == DECODE_CACHE || ctx->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
+            if (!_exists(ctx->palantir_cfg->sr_reference_frame_dir)) {
+                fprintf(stderr, "%s: SR reference frame dir does not exists: %s\n", __func__, ctx->palantir_cfg->sr_reference_frame_dir);
+                return VPX_PALANTIR_ERROR;
             }
         }
     }
-    if (ctx->nemo_cfg->dnn_mode == OFFLINE_DNN) {
-        if (!_exists(ctx->nemo_cfg->sr_offline_frame_dir)) {
+    if (ctx->palantir_cfg->dnn_mode == OFFLINE_DNN && !(ctx->palantir_cfg->save_finegrained_metadata || ctx->palantir_cfg->save_super_finegrained_metadata)) {
+        if (!_exists(ctx->palantir_cfg->sr_offline_frame_dir)) {
+            fprintf(stderr, "%s\n", ctx->palantir_cfg->sr_offline_frame_dir);
             fprintf(stderr, "%s: SR offline frame dir does not exists\n", __func__);
-            return VPX_NEMO_ERROR;
+            return VPX_PALANTIR_ERROR;
         }
     }
 
-    /* NEMO: create directories */
-    if (ctx->nemo_cfg->save_metadata || ctx->nemo_cfg->save_quality || ctx->nemo_cfg->save_latency) {
-        _mkdir(ctx->nemo_cfg->log_dir);
+    /* PALANTIR: create directories */
+    if (ctx->palantir_cfg->save_metadata || ctx->palantir_cfg->save_finegrained_metadata ||
+        ctx->palantir_cfg->save_super_finegrained_metadata ||
+        ctx->palantir_cfg->save_quality || ctx->palantir_cfg->save_latency) {
+        _mkdir(ctx->palantir_cfg->log_dir);
     }
-    if (ctx->nemo_cfg->save_yuvframe || ctx->nemo_cfg->save_rgbframe) {
-        if (ctx->nemo_cfg->decode_mode == DECODE) {
-            _mkdir(ctx->nemo_cfg->input_frame_dir);
-        } else if (ctx->nemo_cfg->decode_mode == DECODE_SR ||
-                   ctx->nemo_cfg->decode_mode == DECODE_CACHE) {
-            _mkdir(ctx->nemo_cfg->sr_frame_dir);
+    if (ctx->palantir_cfg->save_yuvframe || ctx->palantir_cfg->save_rgbframe) {
+        if (ctx->palantir_cfg->decode_mode == DECODE) {
+            _mkdir(ctx->palantir_cfg->input_frame_dir);
+        } else if (ctx->palantir_cfg->decode_mode == DECODE_SR ||
+                   ctx->palantir_cfg->decode_mode == DECODE_CACHE || ctx->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
+            _mkdir(ctx->palantir_cfg->sr_frame_dir);
         }
     }
 
@@ -357,78 +360,103 @@ static vpx_codec_err_t load_nemo_cfg(vpx_codec_alg_priv_t *ctx, nemo_cfg_t *nemo
 }
 
 static vpx_codec_err_t
-load_nemo_dnn(vpx_codec_alg_priv_t *ctx, int scale, const char *dnn_file) {
-    if (ctx->nemo_cfg == NULL) {
-        return VPX_NEMO_ERROR;
+load_palantir_dnn(vpx_codec_alg_priv_t *ctx, int scale, const char *dnn_file) {
+    if (ctx->palantir_cfg == NULL) {
+        return VPX_PALANTIR_ERROR;
+    }
+    
+    ctx->palantir_cfg->dnn = init_palantir_dnn(scale);
+
+#if CONFIG_SNPE
+    ctx->palantir_cfg->dnn->interpreter = snpe_alloc(ctx->palantir_cfg->dnn_runtime);
+    if (snpe_check_runtime(ctx->palantir_cfg->dnn->interpreter)) {
+#ifdef __ANDROID_API__
+        LOGE("Failed to check runtime");
+#endif
+        fprintf(stderr, "%s: Failed to check runtime\n", __func__);
+        return VPX_PALANTIR_ERROR;
     }
 
-    ctx->nemo_cfg->dnn = init_nemo_dnn(scale);
-
     if (dnn_file != NULL) {
-#if CONFIG_SNPE
-        ctx->nemo_cfg->dnn->interpreter = snpe_alloc(ctx->nemo_cfg->dnn_runtime);
-        if (snpe_check_runtime(ctx->nemo_cfg->dnn->interpreter)) {
-#ifdef __ANDROID_API__
-            LOGE("Failed to check runtime");
-#endif
-            fprintf(stderr, "%s: Failed to check runtime\n", __func__);
-            return VPX_NEMO_ERROR;
-        }
-
-        if (snpe_load_network(ctx->nemo_cfg->dnn->interpreter, dnn_file)) {
+        if (snpe_load_network(ctx->palantir_cfg->dnn->interpreter, dnn_file)) {
 #ifdef __ANDROID_API__
             LOGE("Failed to load network: %s", dnn_file);
 #endif
             fprintf(stderr, "%s: Failed to load network: %s\n", __func__);
-            return VPX_NEMO_ERROR;
+            return VPX_PALANTIR_ERROR;
         }
-#endif
     }
+#endif
 
     return VPX_CODEC_OK;
 }
 
 static vpx_codec_err_t
-load_nemo_cache_profile(vpx_codec_alg_priv_t *ctx, int scale, const char *cache_profile_path) {
-    if (ctx->nemo_cfg == NULL) {
-        return VPX_NEMO_ERROR;
+load_palantir_cache_profile(vpx_codec_alg_priv_t *ctx, int scale, const char *cache_profile_path, int num_patches_per_row, int num_patches_per_column) {
+    if (ctx->palantir_cfg == NULL) {
+        return VPX_PALANTIR_ERROR;
     }
 
-    ctx->nemo_cfg->cache_profile = init_nemo_cache_profile();
-    ctx->nemo_cfg->bilinear_coeff = init_bilinear_coeff(64, 64, scale);
+    ctx->palantir_cfg->cache_profile = init_palantir_cache_profile();
+    ctx->palantir_cfg->bilinear_coeff = init_bilinear_coeff(64, 64, scale);
 
-    if ((ctx->nemo_cfg->cache_profile->file = fopen(cache_profile_path, "rb")) == NULL) {
+    if ((ctx->palantir_cfg->cache_profile->file = fopen(cache_profile_path, "rb")) == NULL) {
 #ifdef __ANDROID_API__
         LOGE("Failed to open a file");
 #endif
         fprintf(stderr, "%s: fail to open a file %s\n", __func__, cache_profile_path);
-        return VPX_NEMO_ERROR;
+        return VPX_PALANTIR_ERROR;
+    } else {
+        fprintf(stderr, "%s: file %s opened\n", __func__, cache_profile_path);
     }
 
     struct stat buf;
-    fstat(fileno(ctx->nemo_cfg->cache_profile->file), &buf);
-    ctx->nemo_cfg->cache_profile->file_size = buf.st_size;
+    fstat(fileno(ctx->palantir_cfg->cache_profile->file), &buf);
+    ctx->palantir_cfg->cache_profile->file_size = buf.st_size;
 
     return VPX_CODEC_OK;
+}
+
+static vpx_codec_err_t
+init_palantir_dependency_graph(vpx_codec_alg_priv_t *ctx, int num_patches_per_row, int num_patches_per_column) {
+    ctx->palantir_cfg->dependency_graph = (palantir_dependency_graph_t *) vpx_calloc(1, sizeof(palantir_dependency_graph_t));
+    ctx->palantir_cfg->dependency_graph->block_residual = vpx_calloc(num_patches_per_row*num_patches_per_column, sizeof(float));
+    ctx->palantir_cfg->dependency_graph->block_encoding_size = vpx_calloc(num_patches_per_row*num_patches_per_column, sizeof(float));
+    ctx->palantir_cfg->dependency_graph->block_dqvs = vpx_calloc(num_patches_per_row*num_patches_per_column, sizeof(float));
+    ctx->palantir_cfg->dependency_graph->block_dependency_weight = vpx_calloc(3, sizeof(float*));
+    for (int reference_frame_idx = 0; reference_frame_idx < 3; reference_frame_idx ++) {
+        ctx->palantir_cfg->dependency_graph->block_dependency_weight[reference_frame_idx] = vpx_calloc(num_patches_per_row*num_patches_per_column*num_patches_per_row*num_patches_per_column, sizeof(float));
+    }
+    return VPX_CODEC_OK;
+}
+
+static void
+reset_palantir_dependency_graph(vpx_codec_alg_priv_t *ctx, int num_patches_per_row, int num_patches_per_column) {
+    memset(ctx->palantir_cfg->dependency_graph->block_residual, 0, num_patches_per_row*num_patches_per_column*sizeof(float));
+    memset(ctx->palantir_cfg->dependency_graph->block_encoding_size, 0, num_patches_per_row*num_patches_per_column*sizeof(float));
+    memset(ctx->palantir_cfg->dependency_graph->block_dqvs, 0, num_patches_per_row*num_patches_per_column*sizeof(float));
+    for (int reference_frame_idx = 0; reference_frame_idx < REFS_PER_FRAME; reference_frame_idx ++) {
+        memset(ctx->palantir_cfg->dependency_graph->block_dependency_weight[reference_frame_idx], 0, num_patches_per_row*num_patches_per_column*num_patches_per_row*num_patches_per_column*sizeof(float));
+    }
 }
 
 static vpx_codec_err_t init_decoder(vpx_codec_alg_priv_t *ctx) {
     char file_path[PATH_MAX] = {0};
 
-    /* NEMO: validate nemo_cfg */
-    if (ctx->nemo_cfg->decode_mode == DECODE_SR && ctx->nemo_cfg->dnn_mode == ONLINE_DNN) {
-        if (ctx->nemo_cfg->dnn == NULL) {
-            return VPX_NEMO_ERROR;
+    /* PALANTIR: validate palantir_cfg */
+    if ((ctx->palantir_cfg->decode_mode == DECODE_SR || ctx->palantir_cfg->decode_mode == DECODE_CACHE || ctx->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) && ctx->palantir_cfg->dnn_mode == ONLINE_DNN) {
+        if (ctx->palantir_cfg->dnn == NULL) {
+            return VPX_PALANTIR_ERROR;
         }
     }
-    else if (ctx->nemo_cfg->decode_mode == DECODE_CACHE) {
-        if (ctx->nemo_cfg->bilinear_coeff == NULL) {
-            return VPX_NEMO_ERROR;
+    else if (ctx->palantir_cfg->decode_mode == DECODE_CACHE || ctx->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
+        if (ctx->palantir_cfg->bilinear_coeff == NULL) {
+            return VPX_PALANTIR_ERROR;
         }
     }
-    else if (ctx->nemo_cfg->decode_mode == DECODE_CACHE && ctx->nemo_cfg->cache_mode == PROFILE_CACHE) {
-        if (ctx->nemo_cfg->cache_profile == NULL) {
-            return VPX_NEMO_ERROR;
+    else if ((ctx->palantir_cfg->decode_mode == DECODE_CACHE || ctx->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) && ctx->palantir_cfg->cache_mode == PROFILE_CACHE) {
+        if (ctx->palantir_cfg->cache_profile == NULL) {
+            return VPX_PALANTIR_ERROR;
         }
     }
 
@@ -454,22 +482,22 @@ static vpx_codec_err_t init_decoder(vpx_codec_alg_priv_t *ctx) {
 
     init_buffer_callbacks(ctx);
 
-    /* NEMO: copy variables from ctx->nemo_cfg */
-    ctx->pbi->common.nemo_cfg = ctx->nemo_cfg;
-    ctx->pbi->common.buffer_pool->mode = ctx->nemo_cfg->decode_mode;
-    if (ctx->nemo_cfg->decode_mode == DECODE_SR || ctx->nemo_cfg->decode_mode == DECODE_CACHE) {
-        ctx->pbi->common.scale = ctx->nemo_cfg->dnn->scale;
+    /* PALANTIR: copy variables from ctx->palantir_cfg */
+    ctx->pbi->common.palantir_cfg = ctx->palantir_cfg;
+    ctx->pbi->common.buffer_pool->mode = ctx->palantir_cfg->decode_mode;
+    if (ctx->palantir_cfg->decode_mode == DECODE_SR || ctx->palantir_cfg->decode_mode == DECODE_CACHE || ctx->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
+        ctx->pbi->common.scale = ctx->palantir_cfg->dnn->scale;
     }
 
-    /* NEMO: initialize workers */
+    /* PALANTIR: initialize workers */
     const int num_threads = (ctx->pbi->max_threads > 1) ? ctx->pbi->max_threads : 1;
-    if ((ctx->pbi->nemo_worker_data = init_nemo_worker(num_threads, ctx->nemo_cfg)) ==
+    if ((ctx->pbi->palantir_worker_data = init_palantir_worker(num_threads, ctx->palantir_cfg)) ==
         NULL) {
-        set_error_detail(ctx, "Failed to allocate nemo_worker_data");
-        return VPX_NEMO_ERROR;
+        set_error_detail(ctx, "Failed to allocate palantir_worker_data");
+        return VPX_PALANTIR_ERROR;
     }
 
-    /* NEMO: initialize frames/tensors */
+    /* PALANTIR: initialize frames/tensors */
     ctx->pbi->common.rgb24_input_tensor = (RGB24_BUFFER_CONFIG *) vpx_calloc(1, sizeof(RGB24_BUFFER_CONFIG));
     ctx->pbi->common.rgb24_sr_tensor = (RGB24_BUFFER_CONFIG *) vpx_calloc(1, sizeof(RGB24_BUFFER_CONFIG));
     ctx->pbi->common.yv12_input_frame = (YV12_BUFFER_CONFIG *) vpx_calloc(1, sizeof(YV12_BUFFER_CONFIG));
@@ -477,30 +505,58 @@ static vpx_codec_err_t init_decoder(vpx_codec_alg_priv_t *ctx) {
     ctx->pbi->common.rgb24_input_frame = (RGB24_BUFFER_CONFIG *) vpx_calloc(1, sizeof(RGB24_BUFFER_CONFIG));
     ctx->pbi->common.rgb24_reference_frame = (RGB24_BUFFER_CONFIG *) vpx_calloc(1, sizeof(RGB24_BUFFER_CONFIG));
 
-    /* NEMO: open a quality log file, initialize frames used for quality measurements */
-    if (ctx->nemo_cfg->save_quality) {
-        sprintf(file_path, "%s/quality.txt", ctx->nemo_cfg->log_dir);
+    /* PALANTIR: open a quality log file, initialize frames used for quality measurements */
+    if (ctx->palantir_cfg->save_quality) {
+        sprintf(file_path, "%s/quality.txt", ctx->palantir_cfg->log_dir);
         if ((ctx->pbi->common.quality_log = fopen(file_path, "w")) == NULL) {
             fprintf(stderr, "%s: cannot open a file %s", __func__, file_path);
-            ctx->nemo_cfg->save_quality = 0;
+            ctx->palantir_cfg->save_quality = 0;
         };
     }
 
-    /* NEMO: open a latency log file */
-    if (ctx->nemo_cfg->save_latency) {
-        sprintf(file_path, "%s/latency.txt", ctx->nemo_cfg->log_dir);
+    /* PALANTIR: open a latency log file */
+    if (ctx->palantir_cfg->save_latency) {
+        sprintf(file_path, "%s/latency.txt", ctx->palantir_cfg->log_dir);
         if ((ctx->pbi->common.latency_log = fopen(file_path, "w")) == NULL) {
             fprintf(stderr, "%s: cannot open a file %s", __func__, file_path);
-            ctx->nemo_cfg->save_latency = 0;
+            ctx->palantir_cfg->save_latency = 0;
         };
     }
 
-    /* NEMO: open a metadata log file */
-    if (ctx->nemo_cfg->save_metadata) {
-        sprintf(file_path, "%s/metadata.txt", ctx->nemo_cfg->log_dir);
+    /* PALANTIR: alloc space for block-level scheduling */
+    if (ctx->palantir_cfg->decode_mode == DECODE_CACHE || ctx->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
+        fprintf(stdout, "Allocated block_apply_dnn cfg=%d %d", ctx->palantir_cfg->num_patches_per_row, ctx->palantir_cfg->num_patches_per_column);
+        ctx->palantir_cfg->cache_profile->block_apply_dnn = vpx_calloc(ctx->palantir_cfg->num_patches_per_row*ctx->palantir_cfg->num_patches_per_column, sizeof(int));
+        ctx->palantir_cfg->cache_profile->anchor_block_input_buffer = (RGB24_BUFFER_CONFIG *) vpx_calloc(1, sizeof(RGB24_BUFFER_CONFIG));
+        RGB24_realloc_frame_buffer(ctx->palantir_cfg->cache_profile->anchor_block_input_buffer, ctx->palantir_cfg->patch_width, ctx->palantir_cfg->patch_height);
+        ctx->palantir_cfg->cache_profile->anchor_block_sr_buffer = (RGB24_BUFFER_CONFIG *) vpx_calloc(1, sizeof(RGB24_BUFFER_CONFIG));
+        RGB24_realloc_frame_buffer(ctx->palantir_cfg->cache_profile->anchor_block_sr_buffer, ctx->palantir_cfg->patch_width * ctx->palantir_cfg->dnn->scale, ctx->palantir_cfg->patch_height * ctx->palantir_cfg->dnn->scale);
+    }
+
+    /* PALANTIR: open a metadata log file */
+    if (ctx->palantir_cfg->save_metadata) {
+        sprintf(file_path, "%s/metadata.txt", ctx->palantir_cfg->log_dir);
         if ((ctx->pbi->common.metadata_log = fopen(file_path, "w")) == NULL) {
             fprintf(stderr, "%s: cannot open a file %s", __func__, file_path);
-            ctx->nemo_cfg->save_metadata = 0;
+            ctx->palantir_cfg->save_metadata = 0;
+        };
+    }
+
+    /* PALANTIR: open a super-finegrained metadata log file */
+    if (ctx->palantir_cfg->save_super_finegrained_metadata) {
+        sprintf(file_path, "%s/super_finegrained_metadata.txt", ctx->palantir_cfg->log_dir);
+        if ((ctx->pbi->common.super_finegrained_metadata_log = fopen(file_path, "w")) == NULL) {
+            fprintf(stderr, "%s: cannot open a file %s", __func__, file_path);
+            ctx->palantir_cfg->save_super_finegrained_metadata = 0;
+        };
+    }
+
+    /* PALANTIR: open a finegrained metadata log file */
+    if (ctx->palantir_cfg->save_finegrained_metadata) {
+        sprintf(file_path, "%s/finegrained_metadata.txt", ctx->palantir_cfg->log_dir);
+        if ((ctx->pbi->common.finegrained_metadata_log = fopen(file_path, "w")) == NULL) {
+            fprintf(stderr, "%s: cannot open a file %s", __func__, file_path);
+            ctx->palantir_cfg->save_finegrained_metadata = 0;
         };
     }
 
@@ -615,7 +671,7 @@ YV12_load_frame_buffer(YV12_BUFFER_CONFIG *frame, const char *save_dir, const ch
     sprintf(file_path, "%s/%s.y", save_dir, file_name);
     serialize_file = fopen(file_path, "rb");
     if (serialize_file == NULL) {
-        fprintf(stderr, "%s: fail to save a file to %s\n", __func__, file_path);
+        fprintf(stderr, "%s: fail to load a file from %s\n", __func__, file_path);
         return -1;
     }
     uint8_t *src = frame->y_buffer;
@@ -662,26 +718,26 @@ YV12_load_frame_buffer(YV12_BUFFER_CONFIG *frame, const char *save_dir, const ch
 static void save_input_rgbframe(VP9_COMMON *cm) {
     char file_path[PATH_MAX] = {0};
     int width, height;
-    if (cm->nemo_cfg->target_height != 0 && cm->nemo_cfg->target_width != 0) {
-        width = cm->nemo_cfg->target_width;
-        height = cm->nemo_cfg->target_height;
+    if (cm->palantir_cfg->target_height != 0 && cm->palantir_cfg->target_width != 0) {
+        width = cm->palantir_cfg->target_width;
+        height = cm->palantir_cfg->target_height;
     } else {
         width = cm->width;
         height = cm->height;
     }
 
     if (cm->show_frame) {
-        sprintf(file_path, "%s/%05d.raw", cm->nemo_cfg->input_frame_dir,
+        sprintf(file_path, "%s/%04d.raw", cm->palantir_cfg->input_frame_dir,
                 cm->current_video_frame - 1);
     } else {
-        sprintf(file_path, "%s/%05d_%d.raw", cm->nemo_cfg->input_frame_dir,
+        sprintf(file_path, "%s/%04d_%d.raw", cm->palantir_cfg->input_frame_dir,
                 cm->current_video_frame, cm->current_super_frame);
     }
 
     //up-scale a yuv frame
     YV12_BUFFER_CONFIG *yuv_frame = get_frame_new_buffer(cm);
     YV12_BUFFER_CONFIG *scaled_yuv_frame = cm->yv12_input_frame;
-    YV12_BUFFER_CONFIG *scaled_rgb_frame = cm->rgb24_input_frame;
+    RGB24_BUFFER_CONFIG *scaled_rgb_frame = cm->rgb24_input_frame;
     vpx_realloc_frame_buffer(
             scaled_yuv_frame, width, height,
             cm->subsampling_x,
@@ -712,18 +768,18 @@ static void save_input_rgbframe(VP9_COMMON *cm) {
 static void save_input_yuvframe(VP9_COMMON *cm) {
     char file_name[PATH_MAX] = {0};
     int width, height;
-    if (cm->nemo_cfg->target_height != 0 && cm->nemo_cfg->target_width != 0) {
-        width = cm->nemo_cfg->target_width;
-        height = cm->nemo_cfg->target_height;
+    if (cm->palantir_cfg->target_height != 0 && cm->palantir_cfg->target_width != 0) {
+        width = cm->palantir_cfg->target_width;
+        height = cm->palantir_cfg->target_height;
     } else {
         width = cm->width;
         height = cm->height;
     }
 
     if (cm->show_frame) {
-        sprintf(file_name, "%05d", cm->current_video_frame - 1);
+        sprintf(file_name, "%04d", cm->current_video_frame - 1);
     } else {
-        sprintf(file_name, "%05d_%d", cm->current_video_frame, cm->current_super_frame);
+        sprintf(file_name, "%04d_%d", cm->current_video_frame, cm->current_super_frame);
     }
 
     //up-scale a yuv frame
@@ -749,32 +805,32 @@ static void save_input_yuvframe(VP9_COMMON *cm) {
               3);
 
     //save a yuv frame
-    YV12_save_frame_buffer(scaled_yuv_frame, cm->nemo_cfg->input_frame_dir, file_name);
+    YV12_save_frame_buffer(scaled_yuv_frame, cm->palantir_cfg->input_frame_dir, file_name);
 }
 
 static void save_sr_rgbframe(VP9_COMMON *cm) {
     char file_path[PATH_MAX] = {0};
     int width, height;
-    if (cm->nemo_cfg->target_height != 0 && cm->nemo_cfg->target_width != 0) {
-        width = cm->nemo_cfg->target_width;
-        height = cm->nemo_cfg->target_height;
+    if (cm->palantir_cfg->target_height != 0 && cm->palantir_cfg->target_width != 0) {
+        width = cm->palantir_cfg->target_width;
+        height = cm->palantir_cfg->target_height;
     } else {
         width = cm->width;
         height = cm->height;
     }
 
     if (cm->show_frame) {
-        sprintf(file_path, "%s/%05d.raw", cm->nemo_cfg->sr_frame_dir,
+        sprintf(file_path, "%s/%04d.raw", cm->palantir_cfg->sr_frame_dir,
                 cm->current_video_frame - 1);
     } else {
-        sprintf(file_path, "%s/%05d_%d.raw", cm->nemo_cfg->sr_frame_dir, cm->current_video_frame,
+        sprintf(file_path, "%s/%04d_%d.raw", cm->palantir_cfg->sr_frame_dir, cm->current_video_frame,
                 cm->current_super_frame);
     }
 
     //up-scale a yuv frame
     YV12_BUFFER_CONFIG *yuv_frame = get_sr_frame_new_buffer(cm);
     YV12_BUFFER_CONFIG *scaled_yuv_frame = cm->yv12_reference_frame;
-    YV12_BUFFER_CONFIG *scaled_rgb_frame = cm->rgb24_reference_frame;
+    RGB24_BUFFER_CONFIG *scaled_rgb_frame = cm->rgb24_reference_frame;
     vpx_realloc_frame_buffer(
             scaled_yuv_frame, width, height,
             cm->subsampling_x,
@@ -805,17 +861,17 @@ static void save_sr_rgbframe(VP9_COMMON *cm) {
 static void save_sr_yuv_frame(VP9_COMMON *cm) {
     char file_name[PATH_MAX] = {0};
     int width, height;
-    if (cm->nemo_cfg->target_height != 0 && cm->nemo_cfg->target_width != 0) {
-        width = cm->nemo_cfg->target_width;
-        height = cm->nemo_cfg->target_height;
+    if (cm->palantir_cfg->target_height != 0 && cm->palantir_cfg->target_width != 0) {
+        width = cm->palantir_cfg->target_width;
+        height = cm->palantir_cfg->target_height;
     } else {
         width = cm->width;
         height = cm->height;
     }
     if (cm->show_frame) {
-        sprintf(file_name, "%05d", cm->current_video_frame - 1);
+        sprintf(file_name, "%04d", cm->current_video_frame - 1);
     } else {
-        sprintf(file_name, "%05d_%d", cm->current_video_frame, cm->current_super_frame);
+        sprintf(file_name, "%04d_%d", cm->current_video_frame, cm->current_super_frame);
     }
 
     //up-scale a yuv frame
@@ -841,38 +897,36 @@ static void save_sr_yuv_frame(VP9_COMMON *cm) {
               3);
 
     //save a yuv frame
-    YV12_save_frame_buffer(scaled_yuv_frame, cm->nemo_cfg->sr_frame_dir, file_name);
+    YV12_save_frame_buffer(scaled_yuv_frame, cm->palantir_cfg->sr_frame_dir, file_name);
 }
 
 static void save_rgbframe(VP9_COMMON *cm) {
-    switch (cm->nemo_cfg->decode_mode) {
+    switch (cm->palantir_cfg->decode_mode) {
         case DECODE:
             save_input_rgbframe(cm);
             break;
         case DECODE_SR:
             save_sr_rgbframe(cm);
             break;
-        case DECODE_CACHE:
+        case DECODE_CACHE:case DECODE_BLOCK_CACHE:
             save_sr_rgbframe(cm);
             break;
     }
 }
 
 static void save_yuvframe(VP9_COMMON *cm) {
-    if (cm->show_frame) {
-        if (cm->nemo_cfg->filter_interval == 0 ||
-            (cm->current_video_frame - 1) % cm->nemo_cfg->filter_interval == 0) {
-            switch (cm->nemo_cfg->decode_mode) {
-                case DECODE:
-                    save_input_yuvframe(cm);
-                    break;
-                case DECODE_SR:
-                    save_sr_yuv_frame(cm);
-                    break;
-                case DECODE_CACHE:
-                    save_sr_yuv_frame(cm);
-                    break;
-            }
+    if (cm->palantir_cfg->filter_interval == 0 ||
+        (cm->current_video_frame - 1) % cm->palantir_cfg->filter_interval == 0) {
+        switch (cm->palantir_cfg->decode_mode) {
+            case DECODE:
+                save_input_yuvframe(cm);
+                break;
+            case DECODE_SR:
+                save_sr_yuv_frame(cm);
+                break;
+            case DECODE_CACHE:case DECODE_BLOCK_CACHE:
+                save_sr_yuv_frame(cm);
+                break;
         }
     }
 }
@@ -882,17 +936,17 @@ static void save_input_quality(VP9_COMMON *cm) {
     char log[LOG_MAX] = {0};
     int width, height;
 
-    if (cm->nemo_cfg->target_height != 0 && cm->nemo_cfg->target_width != 0) {
-        width = cm->nemo_cfg->target_width;
-        height = cm->nemo_cfg->target_height;
+    if (cm->palantir_cfg->target_height != 0 && cm->palantir_cfg->target_width != 0) {
+        width = cm->palantir_cfg->target_width;
+        height = cm->palantir_cfg->target_height;
     } else {
         width = cm->width;
         height = cm->height;
     }
     if (cm->show_frame) {
-        sprintf(file_name, "%05d", cm->current_video_frame - 1);
+        sprintf(file_name, "%04d", cm->current_video_frame - 1);
     } else {
-        sprintf(file_name, "%05d_%d", cm->current_video_frame, cm->current_super_frame);
+        sprintf(file_name, "%04d_%d", cm->current_video_frame, cm->current_super_frame);
     }
 
     //up-scale a yuv frame
@@ -928,7 +982,7 @@ static void save_input_quality(VP9_COMMON *cm) {
 #endif
             VP9_DEC_BORDER_IN_PIXELS, cm->byte_alignment,
             NULL, NULL, NULL);
-    YV12_load_frame_buffer(reference_frame, cm->nemo_cfg->input_reference_frame_dir, file_name);
+    YV12_load_frame_buffer(reference_frame, cm->palantir_cfg->input_reference_frame_dir, file_name);
 
     //calculate PSNR
     PSNR_STATS psnr_stats;
@@ -948,17 +1002,17 @@ static void save_sr_quality(VP9_COMMON *cm) {
     char log[LOG_MAX] = {0};
     int width, height;
 
-    if (cm->nemo_cfg->target_height != 0 && cm->nemo_cfg->target_width != 0) {
-        width = cm->nemo_cfg->target_width;
-        height = cm->nemo_cfg->target_height;
+    if (cm->palantir_cfg->target_height != 0 && cm->palantir_cfg->target_width != 0) {
+        width = cm->palantir_cfg->target_width;
+        height = cm->palantir_cfg->target_height;
     } else {
         width = cm->width * cm->scale;
         height = cm->height * cm->scale;
     }
     if (cm->show_frame) {
-        sprintf(file_name, "%05d", cm->current_video_frame - 1);
+        sprintf(file_name, "%04d", cm->current_video_frame - 1);
     } else {
-        sprintf(file_name, "%05d_%d", cm->current_video_frame, cm->current_super_frame);
+        sprintf(file_name, "%04d_%d", cm->current_video_frame, cm->current_super_frame);
     }
 
     //upscale a yuv frame
@@ -994,7 +1048,7 @@ static void save_sr_quality(VP9_COMMON *cm) {
 #endif
             VP9_DEC_BORDER_IN_PIXELS, cm->byte_alignment,
             NULL, NULL, NULL);
-    YV12_load_frame_buffer(sr_compare_frame, cm->nemo_cfg->sr_reference_frame_dir, file_name);
+    YV12_load_frame_buffer(sr_compare_frame, cm->palantir_cfg->sr_reference_frame_dir, file_name);
 
     //calculate PSNR
     PSNR_STATS psnr_stats;
@@ -1010,14 +1064,11 @@ static void save_sr_quality(VP9_COMMON *cm) {
 }
 
 static void save_quality(VP9_COMMON *cm) {
-    switch (cm->nemo_cfg->decode_mode) {
+    switch (cm->palantir_cfg->decode_mode) {
         case DECODE:
             save_input_quality(cm);
             break;
-        case DECODE_SR:
-            save_sr_quality(cm);
-            break;
-        case DECODE_CACHE:
+        case DECODE_SR: case DECODE_CACHE: case DECODE_BLOCK_CACHE:
             save_sr_quality(cm);
             break;
     }
@@ -1030,7 +1081,7 @@ static void save_latency(VP9Decoder *pbi, int video_frame_index, int super_frame
     const int num_threads = (pbi->max_threads > 1) ? pbi->max_threads : 1;
 
     for (i = 0; i < num_threads; ++i) {
-        nemo_worker_data_t *mwd = &pbi->nemo_worker_data[i];
+        palantir_worker_data_t *mwd = &pbi->palantir_worker_data[i];
         //sprintf(log, "%d\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\n", video_frame_index,
         //        super_frame_index, mwd->latency.interp_intra_block, mwd->latency.interp_inter_residual,
         //        mwd->latency.decode_intra_block, mwd->latency.decode_inter_block,  mwd->latency.decode_inter_residual);
@@ -1043,15 +1094,16 @@ static void save_latency(VP9Decoder *pbi, int video_frame_index, int super_frame
         fputs(log, mwd->latency_log);
     }
 
-    if (pbi->common.apply_dnn == 0) {
+    if (pbi->common.frame_apply_dnn == 0) {
         sprintf(log, "%d\t%d\t%.2f\n", video_frame_index, super_frame_index,
                 pbi->common.latency.decode);
     } else {
-        sprintf(log, "%d\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\n", video_frame_index,
+        sprintf(log, "%d\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\n", video_frame_index,
                 super_frame_index, pbi->common.latency.decode,
                 pbi->common.latency.sr_convert_yuv_to_rgb, pbi->common.latency.sr_execute_dnn,
                 pbi->common.latency.sr_convert_float_to_int,
-                pbi->common.latency.sr_convert_rgb_to_yuv);
+                pbi->common.latency.sr_convert_rgb_to_yuv,
+                pbi->common.latency.sr_num_anchors);
     }
     fputs(log, pbi->common.latency_log);
 
@@ -1063,47 +1115,106 @@ static void save_latency(VP9Decoder *pbi, int video_frame_index, int super_frame
 #endif
 }
 
-static void save_metadata(VP9Decoder *pbi, int current_video_frame, int current_super_frame) {
+static void save_super_finegrained_metadata_frame_index(VP9Decoder *pbi, int current_video_frame, int current_super_frame) {
+    char log[LOG_MAX] = {0};
+    sprintf(log, "[FRAME]%d\t%d\n", current_video_frame, current_super_frame);
+    fputs(log, pbi->common.super_finegrained_metadata_log);
+}
+
+static void save_metadata(VP9Decoder *pbi, int current_video_frame, int current_super_frame, uint32_t frame_size) {
     int i;
     char log[LOG_MAX] = {0};
     const int num_threads = (pbi->max_threads > 1) ? pbi->max_threads : 1;
 
     for (i = 0; i < num_threads; ++i) {
-        nemo_worker_data_t *mwd = &pbi->nemo_worker_data[i];
+        palantir_worker_data_t *mwd = &pbi->palantir_worker_data[i];
         sprintf(log, "%d\t%d\t%d\t%d\t%d\t%d\n", current_video_frame, current_super_frame,
                 mwd->metadata.num_blocks, mwd->metadata.num_intrablocks,
                 mwd->metadata.num_interblocks, mwd->metadata.num_noskip_interblocks);
         fputs(log, mwd->metadata_log);
     }
 
-    if (pbi->common.frame_type == KEY_FRAME || pbi->common.intra_only) {
-        sprintf(log, "%d\t%d\t%d\t%d\t%d\tkey_frame\n", current_video_frame, current_super_frame,
-                pbi->common.apply_dnn, pbi->common.frame_type, pbi->common.intra_only);
-    } else {
-        if (pbi->common.show_frame == 0) {
-            sprintf(log,
-                    "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\talternative_reference_frame\n",
-                    current_video_frame, current_super_frame, pbi->common.apply_dnn,
-                    pbi->common.frame_type, pbi->common.intra_only,
-                    pbi->common.metadata.reference_frames[0].video_frame_index,
-                    pbi->common.metadata.reference_frames[0].super_frame_index,
-                    pbi->common.metadata.reference_frames[1].video_frame_index,
-                    pbi->common.metadata.reference_frames[1].super_frame_index,
-                    pbi->common.metadata.reference_frames[2].video_frame_index,
-                    pbi->common.metadata.reference_frames[2].super_frame_index);
+    if (pbi->common.palantir_cfg->save_frame_size) {
+        if (pbi->common.frame_type == KEY_FRAME || pbi->common.intra_only) {
+            sprintf(log, "%d\t%d\t%d\t%d\t%d\t%d\tkey_frame\n", current_video_frame, current_super_frame,
+                    pbi->common.frame_apply_dnn, pbi->common.frame_type, pbi->common.intra_only, frame_size);
         } else {
-            sprintf(log, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\tnormal_frame\n",
-                    current_video_frame, current_super_frame, pbi->common.apply_dnn,
-                    pbi->common.frame_type, pbi->common.intra_only,
-                    pbi->common.metadata.reference_frames[0].video_frame_index,
-                    pbi->common.metadata.reference_frames[0].super_frame_index,
-                    pbi->common.metadata.reference_frames[1].video_frame_index,
-                    pbi->common.metadata.reference_frames[1].super_frame_index,
-                    pbi->common.metadata.reference_frames[2].video_frame_index,
-                    pbi->common.metadata.reference_frames[2].super_frame_index);
+            if (pbi->common.show_frame == 0) {
+                sprintf(log,
+                        "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\talternative_reference_frame\n",
+                        current_video_frame, current_super_frame, pbi->common.frame_apply_dnn,
+                        pbi->common.frame_type, pbi->common.intra_only,
+                        pbi->common.metadata.reference_frames[0].video_frame_index,
+                        pbi->common.metadata.reference_frames[0].super_frame_index,
+                        pbi->common.metadata.reference_frames[1].video_frame_index,
+                        pbi->common.metadata.reference_frames[1].super_frame_index,
+                        pbi->common.metadata.reference_frames[2].video_frame_index,
+                        pbi->common.metadata.reference_frames[2].super_frame_index, frame_size);
+            } else {
+                sprintf(log, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\tnormal_frame\n",
+                        current_video_frame, current_super_frame, pbi->common.frame_apply_dnn,
+                        pbi->common.frame_type, pbi->common.intra_only,
+                        pbi->common.metadata.reference_frames[0].video_frame_index,
+                        pbi->common.metadata.reference_frames[0].super_frame_index,
+                        pbi->common.metadata.reference_frames[1].video_frame_index,
+                        pbi->common.metadata.reference_frames[1].super_frame_index,
+                        pbi->common.metadata.reference_frames[2].video_frame_index,
+                        pbi->common.metadata.reference_frames[2].super_frame_index, frame_size);
+            }
+        }
+    } else {
+        if (pbi->common.frame_type == KEY_FRAME || pbi->common.intra_only) {
+            sprintf(log, "%d\t%d\t%d\t%d\t%d\tkey_frame\n", current_video_frame, current_super_frame,
+                    pbi->common.frame_apply_dnn, pbi->common.frame_type, pbi->common.intra_only);
+        } else {
+            if (pbi->common.show_frame == 0) {
+                sprintf(log,
+                        "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\talternative_reference_frame\n",
+                        current_video_frame, current_super_frame, pbi->common.frame_apply_dnn,
+                        pbi->common.frame_type, pbi->common.intra_only,
+                        pbi->common.metadata.reference_frames[0].video_frame_index,
+                        pbi->common.metadata.reference_frames[0].super_frame_index,
+                        pbi->common.metadata.reference_frames[1].video_frame_index,
+                        pbi->common.metadata.reference_frames[1].super_frame_index,
+                        pbi->common.metadata.reference_frames[2].video_frame_index,
+                        pbi->common.metadata.reference_frames[2].super_frame_index);
+            } else {
+                sprintf(log, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\tnormal_frame\n",
+                        current_video_frame, current_super_frame, pbi->common.frame_apply_dnn,
+                        pbi->common.frame_type, pbi->common.intra_only,
+                        pbi->common.metadata.reference_frames[0].video_frame_index,
+                        pbi->common.metadata.reference_frames[0].super_frame_index,
+                        pbi->common.metadata.reference_frames[1].video_frame_index,
+                        pbi->common.metadata.reference_frames[1].super_frame_index,
+                        pbi->common.metadata.reference_frames[2].video_frame_index,
+                        pbi->common.metadata.reference_frames[2].super_frame_index);
+            }
         }
     }
     fputs(log, pbi->common.metadata_log);
+}
+
+static void save_finegrained_metadata(palantir_cfg_t *palantir_cfg, FILE *finegrained_metadata_log) {
+    char log[LOG_MAX] = {0};
+    palantir_dependency_graph_t *palantir_dependency_graph = palantir_cfg->dependency_graph;
+    for (int i = 0; i < palantir_cfg->num_patches_per_row*palantir_cfg->num_patches_per_column; i ++){
+        if (i == palantir_cfg->num_patches_per_row*palantir_cfg->num_patches_per_column - 1) {
+            sprintf(log, "%f\n", palantir_dependency_graph->block_residual[i]);
+        } else {
+            sprintf(log, "%f\t", palantir_dependency_graph->block_residual[i]);
+        }
+        fputs(log, finegrained_metadata_log);
+    }
+    for (int i = 0; i < REFS_PER_FRAME; i ++) {
+        for (int j = 0; j < palantir_cfg->num_patches_per_row*palantir_cfg->num_patches_per_column*palantir_cfg->num_patches_per_row*palantir_cfg->num_patches_per_column; j ++) {
+            if (j == palantir_cfg->num_patches_per_row*palantir_cfg->num_patches_per_column*palantir_cfg->num_patches_per_row*palantir_cfg->num_patches_per_column - 1) {
+                sprintf(log, "%f\n", palantir_dependency_graph->block_dependency_weight[i][j]);
+            } else {
+                sprintf(log, "%f\t", palantir_dependency_graph->block_dependency_weight[i][j]);
+            }
+            fputs(log, finegrained_metadata_log);
+        }
+    }
 }
 
 static vpx_codec_err_t decoder_decode(vpx_codec_alg_priv_t *ctx,
@@ -1162,6 +1273,9 @@ static vpx_codec_err_t decoder_decode(vpx_codec_alg_priv_t *ctx,
             memset(&cm->latency, 0, sizeof(cm->latency));
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 #endif
+            if (ctx->palantir_cfg->save_finegrained_metadata){
+                reset_palantir_dependency_graph(ctx, ctx->palantir_cfg->num_patches_per_row, ctx->palantir_cfg->num_patches_per_column);
+            }
             res = decode_one(ctx, &data_start_copy, frame_size, user_priv, deadline);
 
             if (res != VPX_CODEC_OK) return res;
@@ -1173,15 +1287,20 @@ static vpx_codec_err_t decoder_decode(vpx_codec_alg_priv_t *ctx,
 #endif
             data_start += frame_size;
 
-            /* NEMO: Save logs */
+            /* PALANTIR: Save logs */
             if (cm->show_frame == 0) current_video_frame = cm->current_video_frame;
             else current_video_frame = cm->current_video_frame - 1;
-            if (cm->nemo_cfg->save_rgbframe) save_rgbframe(cm);
-            if (cm->nemo_cfg->save_yuvframe) save_yuvframe(cm);
-            if (cm->nemo_cfg->save_latency)
+            if (ctx->palantir_cfg->save_super_finegrained_metadata){
+                save_super_finegrained_metadata_frame_index(ctx->pbi, current_video_frame, cm->current_super_frame);
+            }
+            if (cm->palantir_cfg->save_rgbframe) save_rgbframe(cm);
+            if (cm->palantir_cfg->save_yuvframe) save_yuvframe(cm);
+            if (cm->palantir_cfg->save_latency)
                 save_latency(ctx->pbi, current_video_frame, cm->current_super_frame);
-            if (cm->nemo_cfg->save_metadata)
-                save_metadata(ctx->pbi, current_video_frame, cm->current_super_frame);
+            if (cm->palantir_cfg->save_metadata)
+                save_metadata(ctx->pbi, current_video_frame, cm->current_super_frame, frame_size);
+            if (cm->palantir_cfg->save_finegrained_metadata) 
+                save_finegrained_metadata(cm->palantir_cfg, ctx->pbi->common.finegrained_metadata_log);
             cm->current_super_frame++;
         }
     } else {
@@ -1192,6 +1311,9 @@ static vpx_codec_err_t decoder_decode(vpx_codec_alg_priv_t *ctx,
             memset(&cm->latency, 0, sizeof(cm->latency));
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 #endif
+            if (ctx->palantir_cfg->save_finegrained_metadata){
+                reset_palantir_dependency_graph(ctx, ctx->palantir_cfg->num_patches_per_row, ctx->palantir_cfg->num_patches_per_column);
+            }
             const vpx_codec_err_t res = decode_one(ctx, &data_start, frame_size, user_priv,
                                                    deadline);
 
@@ -1213,20 +1335,25 @@ static vpx_codec_err_t decoder_decode(vpx_codec_alg_priv_t *ctx,
                 ++data_start;
             }
 
-            /* NEMO: save logs */
-            if (cm->nemo_cfg->save_rgbframe) save_rgbframe(cm);
-            if (cm->nemo_cfg->save_yuvframe) save_yuvframe(cm);
-            if (cm->nemo_cfg->save_latency) {
+            /* PALANTIR: save logs */
+            if (ctx->palantir_cfg->save_super_finegrained_metadata){
+                save_super_finegrained_metadata_frame_index(ctx->pbi, cm->current_video_frame-1, cm->current_super_frame);
+            }
+            if (cm->palantir_cfg->save_rgbframe) save_rgbframe(cm);
+            if (cm->palantir_cfg->save_yuvframe) save_yuvframe(cm);
+            if (cm->palantir_cfg->save_latency) {
                 save_latency(ctx->pbi, cm->current_video_frame - 1, cm->current_super_frame);
             }
-            if (cm->nemo_cfg->save_metadata)
-                save_metadata(ctx->pbi, cm->current_video_frame - 1, cm->current_super_frame);
+            if (cm->palantir_cfg->save_metadata)
+                save_metadata(ctx->pbi, cm->current_video_frame - 1, cm->current_super_frame, frame_size);
+            if (cm->palantir_cfg->save_finegrained_metadata) 
+                save_finegrained_metadata(cm->palantir_cfg, ctx->pbi->common.finegrained_metadata_log);
 
         }
     }
-    /* NEMO: Save logs */
-    if (cm->nemo_cfg->save_quality) save_quality(cm);
-
+    /* PALANTIR: Save logs */
+    if (cm->palantir_cfg->save_quality && cm->show_frame) save_quality(cm);
+    
 
     return res;
 }
@@ -1250,9 +1377,10 @@ static vpx_image_t *decoder_get_frame(vpx_codec_alg_priv_t *ctx,
             if (ctx->need_resync) return NULL;
             yuvconfig2image(&ctx->img, &sd, ctx->user_priv);
 
-            /* NEMO: return a priv depending on decode_mode */
-            if (ctx->nemo_cfg->decode_mode == DECODE_CACHE ||
-                ctx->nemo_cfg->decode_mode == DECODE_SR) {
+            /* PALANTIR: return a priv depending on decode_mode */
+            if (ctx->palantir_cfg->decode_mode == DECODE_CACHE ||
+                ctx->palantir_cfg->decode_mode == DECODE_SR ||
+                ctx->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
                 ctx->img.fb_priv = frame_bufs[cm->new_fb_idx].raw_sr_frame_buffer.priv;
             } else {
                 ctx->img.fb_priv = frame_bufs[cm->new_fb_idx].raw_frame_buffer.priv;
@@ -1555,8 +1683,9 @@ CODEC_INTERFACE(vpx_codec_vp9_dx) = {
                 NULL   // vpx_codec_enc_mr_get_mem_loc_fn_t
         },
         {
-                load_nemo_cfg,
-                load_nemo_dnn,
-                load_nemo_cache_profile
+                load_palantir_cfg,
+                load_palantir_dnn,
+                load_palantir_cache_profile,
+                init_palantir_dependency_graph
         }
 };

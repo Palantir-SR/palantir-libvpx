@@ -1,6 +1,6 @@
 //==============================================================================
 //
-//  Copyright (c) 2017-2019 Qualcomm Technologies, Inc.
+//  Copyright (c) 2017-2022 Qualcomm Technologies, Inc.
 //  All Rights Reserved.
 //  Confidential and Proprietary - Qualcomm Technologies, Inc.
 //
@@ -47,108 +47,14 @@
 #define LOGS(...) __android_log_print(_SILENT,TAG,__VA_ARGS__)
 #endif
 
-
-std::unique_ptr<zdl::DlSystem::ITensor> loadInputTensorFromFloatBuffer(std::shared_ptr<zdl::SNPE::SNPE>& snpe , float * buffer, int number_of_elements){
-    std::unique_ptr<zdl::DlSystem::ITensor> input;
-    const auto &strList_opt = snpe->getInputTensorNames();
-    if (!strList_opt) throw std::runtime_error("Error obtaining Input tensor names");
-    const auto &strList = *strList_opt;
-    // Make sure the network requires only a single input
-    assert (strList.size() == 1);
-
-
-    std::vector<float> inputVec;
-    std::vector<float> loadedFile(buffer, buffer + number_of_elements);
-    inputVec.insert(inputVec.end(), loadedFile.begin(), loadedFile.end());
-
-
-    /* Create an input tensor that is correctly sized to hold the input of the network. Dimensions that have no fixed size will be represented with a value of 0. */
-    const auto &inputDims_opt = snpe->getInputDimensions(strList.at(0));
-    const auto &inputShape = *inputDims_opt;
-
-    /* Calculate the total number of elements that can be stored in the tensor so that we can check that the input contains the expected number of elements.
-       With the input dimensions computed create a tensor to convey the input into the network. */
-    input = zdl::SNPE::SNPEFactory::getTensorFactory().createTensor(inputShape);
-    //Padding the input vector so as to make the size of the vector to equal to an integer multiple of the batch size
-    zdl::DlSystem::TensorShape tensorShape= snpe->getInputDimensions();
-    size_t batchSize = tensorShape.getDimensions()[0];
-    if(1<batchSize) {
-        for(size_t j=0; j<batchSize-1; j++) {
-            std::vector<float> padding(input->getSize()/batchSize,0);
-            inputVec.insert(inputVec.end(),padding.begin(),padding.end());
-        }
-    }
-
-    if (input->getSize() != inputVec.size()) {
-        std::cerr << "Size of input does not match network.\n"
-                  << "Expecting: " << input->getSize() << "\n"
-                  << "Got: " << inputVec.size() << "\n";
-        std::exit(EXIT_FAILURE);
-    }
-
-    /* Copy the loaded input file contents into the networks input tensor. SNPE's ITensor supports C++ STL functions like std::copy() */
-    std::copy(inputVec.begin(), inputVec.end(), input->begin());
-    return std::move(input);
-}
-
-
-std::unique_ptr<zdl::DlSystem::ITensor> loadInputTensorFromByteBuffer(std::shared_ptr<zdl::SNPE::SNPE>& snpe , unsigned char * buffer, int number_of_elements){
-    std::unique_ptr<zdl::DlSystem::ITensor> input;
-    const auto &strList_opt = snpe->getInputTensorNames();
-    if (!strList_opt) throw std::runtime_error("Error obtaining Input tensor names");
-    const auto &strList = *strList_opt;
-    // Make sure the network requires only a single input
-    assert (strList.size() == 1);
-
-    std::vector<unsigned char> inputVec;
-    std::vector<unsigned char> loadedFile(buffer, buffer+number_of_elements);
-    inputVec.insert(inputVec.end(), loadedFile.begin(), loadedFile.end());
-
-    /* Create an input tensor that is correctly sized to hold the input of the network. Dimensions that have no fixed size will be represented with a value of 0. */
-    const auto &inputDims_opt = snpe->getInputDimensions(strList.at(0));
-    const auto &inputShape = *inputDims_opt;
-
-
-    /* Calculate the total number of elements that can be stored in the tensor so that we can check that the input contains the expected number of elements.
-       With the input dimensions computed create a tensor to convey the input into the network. */
-    input = zdl::SNPE::SNPEFactory::getTensorFactory().createTensor(inputShape);
-    //Padding the input vector so as to make the size of the vector to equal to an integer multiple of the batch size
-    zdl::DlSystem::TensorShape tensorShape= snpe->getInputDimensions();
-    size_t batchSize = tensorShape.getDimensions()[0];
-    if(1<batchSize) {
-        for(size_t j=0; j<batchSize-1; j++) {
-            std::vector<float> padding(input->getSize()/batchSize,0);
-            inputVec.insert(inputVec.end(),padding.begin(),padding.end());
-        }
-    }
-
-
-    if (input->getSize() != inputVec.size()) {
-#if __ANDROID_API__
-        LOGE("Size of input does not match network.");
-        LOGE("Expecting: %d", input->getSize());
-        LOGE("Got: %d", inputVec.size());
-#endif
-        std::cerr << "Size of input does not match network.\n"
-                  << "Expecting: " << input->getSize() << "\n"
-                  << "Got: " << inputVec.size() << "\n";
-        std::exit(EXIT_FAILURE);
-    }
-
-    /* Copy the loaded input file contents into the networks input tensor. SNPE's ITensor supports C++ STL functions like std::copy() */
-    std::copy(inputVec.begin(), inputVec.end(), input->begin());
-    return std::move(input);
-}
-
 // Load a batched single input tensor for a network which requires a single input
-std::unique_ptr<zdl::DlSystem::ITensor> loadInputTensor (std::unique_ptr<zdl::SNPE::SNPE>& snpe , std::vector<std::string>& fileLines)
+std::unique_ptr<zdl::DlSystem::ITensor> loadInputTensor (std::unique_ptr<zdl::SNPE::SNPE>& snpe,
+                                                            std::vector<std::string>& fileLines,
+                                                            const zdl::DlSystem::StringList& inputTensorNames)
 {
     std::unique_ptr<zdl::DlSystem::ITensor> input;
-    const auto &strList_opt = snpe->getInputTensorNames();
-    if (!strList_opt) throw std::runtime_error("Error obtaining Input tensor names");
-    const auto &strList = *strList_opt;
     // Make sure the network requires only a single input
-    assert (strList.size() == 1);
+    assert (inputTensorNames.size() == 1);
 
     // If the network has a single input, each line represents the input file to be loaded for that input
     std::vector<float> inputVec;
@@ -160,7 +66,7 @@ std::unique_ptr<zdl::DlSystem::ITensor> loadInputTensor (std::unique_ptr<zdl::SN
     }
 
     /* Create an input tensor that is correctly sized to hold the input of the network. Dimensions that have no fixed size will be represented with a value of 0. */
-    const auto &inputDims_opt = snpe->getInputDimensions(strList.at(0));
+    const auto &inputDims_opt = snpe->getInputDimensions(inputTensorNames.at(0));
     const auto &inputShape = *inputDims_opt;
 
     /* Calculate the total number of elements that can be stored in the tensor so that we can check that the input contains the expected number of elements.
@@ -189,20 +95,18 @@ std::unique_ptr<zdl::DlSystem::ITensor> loadInputTensor (std::unique_ptr<zdl::SN
 }
 
 // Load multiple input tensors for a network which require multiple inputs
-std::tuple<zdl::DlSystem::TensorMap, bool> loadMultipleInput (std::unique_ptr<zdl::SNPE::SNPE>& snpe , std::vector<std::string>& fileLines)
+std::tuple<zdl::DlSystem::TensorMap, bool> loadMultipleInput (std::unique_ptr<zdl::SNPE::SNPE>& snpe,
+                                                                std::vector<std::string>& fileLines,
+                                                                const zdl::DlSystem::StringList& inputTensorNames,
+                                                                std::vector<std::unique_ptr<zdl::DlSystem::ITensor>>& inputs)
 {
     zdl::DlSystem::TensorMap dummy; // dummy map for returning on failure
-    const auto& inputTensorNamesRef = snpe->getInputTensorNames();
-    if (!inputTensorNamesRef) throw std::runtime_error("Error obtaining Input tensor names");
-    const auto &inputTensorNames = *inputTensorNamesRef;
     // Make sure the network requires multiple inputs
     assert (inputTensorNames.size() > 1);
 
     if (inputTensorNames.size()) std::cout << "Processing DNN Input: " << std::endl;
 
-    std::vector<std::unique_ptr<zdl::DlSystem::ITensor>> inputs(inputTensorNames.size());
     zdl::DlSystem::TensorMap  inputTensorMap;
-
     for(size_t i=0; i<fileLines.size(); i++) {
         std::string fileLine(fileLines[i]);
         // Treat each line as a space-separated list of input files
@@ -230,17 +134,19 @@ std::tuple<zdl::DlSystem::TensorMap, bool> loadMultipleInput (std::unique_ptr<zd
             }
 
             std::copy(inputVec.begin(), inputVec.end(), inputs[j]->begin());
-            inputTensorMap.add(inputName.c_str(), inputs[j].release());
+            inputTensorMap.add(inputName.c_str(), inputs[j].get());
         }
     }
     std::cout << "Finished processing inputs for current inference \n";
     return std::make_tuple(inputTensorMap, true);
 }
 
-bool loadInputUserBufferTf8(std::unordered_map<std::string, std::vector<uint8_t>>& applicationBuffers,
+bool loadInputUserBufferTfN(std::unordered_map<std::string, std::vector<uint8_t>>& applicationBuffers,
                          std::unique_ptr<zdl::SNPE::SNPE>& snpe,
                          std::vector<std::string>& fileLines,
-                         zdl::DlSystem::UserBufferMap& inputMap)
+                         zdl::DlSystem::UserBufferMap& inputMap,
+                         bool staticQuantization,
+                         int bitWidth)
 {
     // get input tensor names of the network that need to be populated
     const auto& inputNamesOpt = snpe->getInputTensorNames();
@@ -265,16 +171,28 @@ bool loadInputUserBufferTf8(std::unordered_map<std::string, std::vector<uint8_t>
 
             // load file content onto application storage buffer,
             // on top of which, SNPE has created a user buffer
-            unsigned char stepEquivalentTo0;
-            float quantizedStepSize;
-            if(!loadByteDataFileBatchedTf8(filePath, applicationBuffers.at(name), i, stepEquivalentTo0, quantizedStepSize))
-            {
-                return false;
-            }
-            auto userBufferEncoding = dynamic_cast<zdl::DlSystem::UserBufferEncodingTf8 *>(&inputMap.getUserBuffer(name)->getEncoding());
-            userBufferEncoding->setStepExactly0(stepEquivalentTo0);
-            userBufferEncoding->setQuantizedStepSize(quantizedStepSize);
+            if (staticQuantization) {
+                // If static quantization is enabled then get the quantization parameters
+                // from the user buffer and use them to load the file contents
+                auto userBufferEncoding = dynamic_cast<zdl::DlSystem::UserBufferEncodingTfN *>(&inputMap.getUserBuffer(name)->getEncoding());
+                unsigned char stepEquivalentTo0 = userBufferEncoding->getStepExactly0();
+                float quantizedStepSize = userBufferEncoding->getQuantizedStepSize();
 
+                if(!loadByteDataFileBatchedTfN(filePath, applicationBuffers.at(name), i, stepEquivalentTo0, quantizedStepSize, staticQuantization, bitWidth))
+                    return false;
+            } else {
+                // If static quantization is disabled then get the quantization parameters
+                // dynamically from the inputs to load the file contents and set them to user buffer
+                unsigned char stepEquivalentTo0;
+                float quantizedStepSize;
+
+                if(!loadByteDataFileBatchedTfN(filePath, applicationBuffers.at(name), i, stepEquivalentTo0, quantizedStepSize, staticQuantization, bitWidth))
+                    return false;
+
+                auto userBufferEncoding = dynamic_cast<zdl::DlSystem::UserBufferEncodingTfN *>(&inputMap.getUserBuffer(name)->getEncoding());
+                userBufferEncoding->setStepExactly0(stepEquivalentTo0);
+                userBufferEncoding->setQuantizedStepSize(quantizedStepSize);
+            }
         }
     }
     return true;
@@ -331,4 +249,95 @@ void loadInputUserBuffer(std::unordered_map<std::string, GLuint>& applicationBuf
         const char* name = inputNames.at(i);
         applicationBuffers.at(name) = inputglbuffer;
     };
+}
+
+std::unique_ptr<zdl::DlSystem::ITensor> loadInputTensorFromByteBuffer(std::shared_ptr<zdl::SNPE::SNPE>& snpe , unsigned char * buffer, int number_of_elements){
+    std::unique_ptr<zdl::DlSystem::ITensor> input;
+    const auto &strList_opt = snpe->getInputTensorNames();
+    if (!strList_opt) throw std::runtime_error("Error obtaining Input tensor names");
+    const auto &strList = *strList_opt;
+    // Make sure the network requires only a single input
+    assert (strList.size() == 1);
+
+    std::vector<unsigned char> inputVec;
+    std::vector<unsigned char> loadedFile(buffer, buffer+number_of_elements);
+    inputVec.insert(inputVec.end(), loadedFile.begin(), loadedFile.end());
+
+    /* Create an input tensor that is correctly sized to hold the input of the network. Dimensions that have no fixed size will be represented with a value of 0. */
+    const auto &inputDims_opt = snpe->getInputDimensions(strList.at(0));
+    const auto &inputShape = *inputDims_opt;
+
+
+    /* Calculate the total number of elements that can be stored in the tensor so that we can check that the input contains the expected number of elements.
+       With the input dimensions computed create a tensor to convey the input into the network. */
+    input = zdl::SNPE::SNPEFactory::getTensorFactory().createTensor(inputShape);
+    //Padding the input vector so as to make the size of the vector to equal to an integer multiple of the batch size
+    zdl::DlSystem::TensorShape tensorShape= snpe->getInputDimensions();
+    size_t batchSize = tensorShape.getDimensions()[0];
+    if(1<batchSize) {
+        for(size_t j=0; j<batchSize-1; j++) {
+            std::vector<float> padding(input->getSize()/batchSize,0);
+            inputVec.insert(inputVec.end(),padding.begin(),padding.end());
+        }
+    }
+
+
+    if (input->getSize() != inputVec.size()) {
+#if __ANDROID_API__
+        LOGE("Size of input does not match network.");
+        LOGE("Expecting: %d", input->getSize());
+        LOGE("Got: %d", inputVec.size());
+#endif
+        std::cerr << "Size of input does not match network.\n"
+                  << "Expecting: " << input->getSize() << "\n"
+                  << "Got: " << inputVec.size() << "\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    /* Copy the loaded input file contents into the networks input tensor. SNPE's ITensor supports C++ STL functions like std::copy() */
+    std::copy(inputVec.begin(), inputVec.end(), input->begin());
+    return std::move(input);
+}
+
+std::unique_ptr<zdl::DlSystem::ITensor> loadInputTensorFromFloatBuffer(std::shared_ptr<zdl::SNPE::SNPE>& snpe , float * buffer, int number_of_elements){
+    std::unique_ptr<zdl::DlSystem::ITensor> input;
+    const auto &strList_opt = snpe->getInputTensorNames();
+    if (!strList_opt) throw std::runtime_error("Error obtaining Input tensor names");
+    const auto &strList = *strList_opt;
+    // Make sure the network requires only a single input
+    assert (strList.size() == 1);
+
+
+    std::vector<float> inputVec;
+    std::vector<float> loadedFile(buffer, buffer + number_of_elements);
+    inputVec.insert(inputVec.end(), loadedFile.begin(), loadedFile.end());
+
+
+    /* Create an input tensor that is correctly sized to hold the input of the network. Dimensions that have no fixed size will be represented with a value of 0. */
+    const auto &inputDims_opt = snpe->getInputDimensions(strList.at(0));
+    const auto &inputShape = *inputDims_opt;
+
+    /* Calculate the total number of elements that can be stored in the tensor so that we can check that the input contains the expected number of elements.
+       With the input dimensions computed create a tensor to convey the input into the network. */
+    input = zdl::SNPE::SNPEFactory::getTensorFactory().createTensor(inputShape);
+    //Padding the input vector so as to make the size of the vector to equal to an integer multiple of the batch size
+    zdl::DlSystem::TensorShape tensorShape= snpe->getInputDimensions();
+    size_t batchSize = tensorShape.getDimensions()[0];
+    if(1<batchSize) {
+        for(size_t j=0; j<batchSize-1; j++) {
+            std::vector<float> padding(input->getSize()/batchSize,0);
+            inputVec.insert(inputVec.end(),padding.begin(),padding.end());
+        }
+    }
+
+    if (input->getSize() != inputVec.size()) {
+        std::cerr << "Size of input does not match network.\n"
+                  << "Expecting: " << input->getSize() << "\n"
+                  << "Got: " << inputVec.size() << "\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    /* Copy the loaded input file contents into the networks input tensor. SNPE's ITensor supports C++ STL functions like std::copy() */
+    std::copy(inputVec.begin(), inputVec.end(), input->begin());
+    return std::move(input);
 }

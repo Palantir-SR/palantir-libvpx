@@ -7,12 +7,12 @@
 #include <time.h>
 #include "vpx_dsp/vpx_convert.h"
 #include "./vpx_dsp_rtcd.h"
-#include "vpx/vpx_nemo.h"
+#include "vpx/vpx_palantir.h"
 #include "../vpx/vpx_image.h"
 #include "../vpx_dsp/vpx_dsp_common.h"
 #include "vpx_convert.h"
 #include "../vpx_scale/yv12config.h"
-#include "../vpx/vpx_nemo.h"
+#include "../vpx/vpx_palantir.h"
 
 #define DEBUG_LATENCY 0
 #define BILLION  1E9
@@ -250,6 +250,76 @@ void YV12_to_RGB24_bt701_c(RGB24_BUFFER_CONFIG *rbf, YV12_BUFFER_CONFIG *ybf) {
 }
 
 
+void YV12_to_RGB24_bt701_patch_c(RGB24_BUFFER_CONFIG *rbf, YV12_BUFFER_CONFIG *ybf, int src_x_offset, int src_y_offset, int dst_x_offset, int dst_y_offset, int width, int height) {
+    uint8_t y, u, v;
+    uint8_t y1, u1, v1;
+    uint8_t y2, u2, v2;
+    uint8_t y3, u3, v3;
+
+    int i, j;
+    for (i = 0; i < height; i++) {
+        for (j = 0; j <= width - 4 ; j += 4) {
+            y = *(ybf->y_buffer + (i+src_y_offset) * ybf->y_stride + (j+src_x_offset));
+            u = *(ybf->u_buffer + ((i+src_y_offset) >> ybf->subsampling_y) * ybf->uv_stride + ((j+src_x_offset) >> ybf->subsampling_x));
+            v = *(ybf->v_buffer + ((i+src_y_offset) >> ybf->subsampling_y) * ybf->uv_stride + ((j+src_x_offset) >> ybf->subsampling_x));
+            y1 = *(ybf->y_buffer + (i+src_y_offset) * ybf->y_stride + (j+src_x_offset) + 1);
+            u1 = *(ybf->u_buffer + ((i+src_y_offset) >> ybf->subsampling_y) * ybf->uv_stride + (((j+src_x_offset) + 1) >> ybf->subsampling_x));
+            v1 = *(ybf->v_buffer + ((i+src_y_offset) >> ybf->subsampling_y) * ybf->uv_stride + (((j+src_x_offset) + 1) >> ybf->subsampling_x));
+            y2 = *(ybf->y_buffer + (i+src_y_offset) * ybf->y_stride + (j+src_x_offset) + 2);
+            u2 = *(ybf->u_buffer + ((i+src_y_offset) >> ybf->subsampling_y) * ybf->uv_stride + (((j+src_x_offset) + 2) >> ybf->subsampling_x));
+            v2 = *(ybf->v_buffer + ((i+src_y_offset) >> ybf->subsampling_y) * ybf->uv_stride + (((j+src_x_offset) + 2) >> ybf->subsampling_x));
+            y3 = *(ybf->y_buffer + (i+src_y_offset) * ybf->y_stride + (j+src_x_offset) + 3);
+            u3 = *(ybf->u_buffer + ((i+src_y_offset) >> ybf->subsampling_y) * ybf->uv_stride + (((j+src_x_offset) + 3) >> ybf->subsampling_x));
+            v3 = *(ybf->v_buffer + ((i+src_y_offset) >> ybf->subsampling_y) * ybf->uv_stride + (((j+src_x_offset) + 3) >> ybf->subsampling_x));
+
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + (j+dst_x_offset) * 3) =
+                    clamp(((YR_COEFF_INT * (y - Y_OFFSET) + VR_COEFF_INT * (v - V_OFFSET) + CONVERT_DELTA) >> CONVERT_FRACTION_BIT), 0, 255); // R value
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + ((j+dst_x_offset) + 1) * 3) =
+                    clamp(((YR_COEFF_INT * (y1 - Y_OFFSET) + VR_COEFF_INT * (v1 - V_OFFSET) + CONVERT_DELTA) >> CONVERT_FRACTION_BIT), 0, 255); // R value
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + ((j+dst_x_offset) + 2) * 3) =
+                    clamp(((YR_COEFF_INT * (y2 - Y_OFFSET) + VR_COEFF_INT * (v2 - V_OFFSET) + CONVERT_DELTA) >> CONVERT_FRACTION_BIT), 0, 255); // R value
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + ((j+dst_x_offset) + 3) * 3) =
+                    clamp(((YR_COEFF_INT * (y3 - Y_OFFSET) + VR_COEFF_INT * (v3 - V_OFFSET) + CONVERT_DELTA) >> CONVERT_FRACTION_BIT), 0, 255); // R value
+
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + (j+dst_x_offset) * 3 + 1) =
+                    clamp(((YG_COEFF_INT * (y - Y_OFFSET) - UG_COEFF_INT * (u - U_OFFSET) - VG_COEFF_INT * (v - V_OFFSET) + CONVERT_DELTA)
+                            >> CONVERT_FRACTION_BIT), 0, 255); // G value
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + ((j+dst_x_offset) + 1) * 3 + 1) =
+                    clamp(((YG_COEFF_INT * (y1 - Y_OFFSET) - UG_COEFF_INT * (u1 - U_OFFSET) - VG_COEFF_INT * (v1 - V_OFFSET) + CONVERT_DELTA)
+                            >> CONVERT_FRACTION_BIT), 0, 255); // G value
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + ((j+dst_x_offset) + 2) * 3 + 1) =
+                    clamp(((YG_COEFF_INT * (y2 - Y_OFFSET) - UG_COEFF_INT * (u2 - U_OFFSET) - VG_COEFF_INT * (v2 - V_OFFSET) + CONVERT_DELTA)
+                            >> CONVERT_FRACTION_BIT), 0, 255); // G value
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + ((j+dst_x_offset) + 3) * 3 + 1) =
+                    clamp(((YG_COEFF_INT * (y3 - Y_OFFSET) - UG_COEFF_INT * (u3 - U_OFFSET) - VG_COEFF_INT * (v3 - V_OFFSET) + CONVERT_DELTA)
+                            >> CONVERT_FRACTION_BIT), 0, 255); // G value
+
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + (j+dst_x_offset) * 3 + 2) =
+                    clamp(((YB_COEFF_INT * (y - Y_OFFSET) + UB_COEFF_INT * (u - U_OFFSET) + CONVERT_DELTA) >> CONVERT_FRACTION_BIT), 0, 255); // B value
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + ((j+dst_x_offset) + 1) * 3 + 2) =
+                    clamp(((YB_COEFF_INT * (y1 - Y_OFFSET) + UB_COEFF_INT * (u1 - U_OFFSET) + CONVERT_DELTA) >> CONVERT_FRACTION_BIT), 0, 255); // B value
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + ((j+dst_x_offset) + 2) * 3 + 2) =
+                    clamp(((YB_COEFF_INT * (y2 - Y_OFFSET) + UB_COEFF_INT * (u2 - U_OFFSET) + CONVERT_DELTA) >> CONVERT_FRACTION_BIT), 0, 255); // B value
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + ((j+dst_x_offset) + 3) * 3 + 2) =
+                    clamp(((YB_COEFF_INT * (y3 - Y_OFFSET) + UB_COEFF_INT * (u3 - U_OFFSET) + CONVERT_DELTA) >> CONVERT_FRACTION_BIT), 0, 255); // B value
+        }
+
+        for (; j < width; j++) {
+            y = *(ybf->y_buffer + (i+src_y_offset) * ybf->y_stride + (j+src_x_offset));
+            u = *(ybf->u_buffer + ((i+src_y_offset) >> ybf->subsampling_y) * ybf->uv_stride + ((j+src_x_offset) >> ybf->subsampling_x));
+            v = *(ybf->v_buffer + ((i+src_y_offset) >> ybf->subsampling_y) * ybf->uv_stride + ((j+src_x_offset) >> ybf->subsampling_x));
+
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + (j+dst_x_offset) * 3) =
+                    clamp(((YR_COEFF_INT * (y - Y_OFFSET) + VR_COEFF_INT * (v - V_OFFSET) + CONVERT_DELTA) >> CONVERT_FRACTION_BIT), 0, 255); // R value
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + (j+dst_x_offset) * 3 + 1) =
+                    clamp(((YG_COEFF_INT * (y - Y_OFFSET) - UG_COEFF_INT * (u - U_OFFSET) - VG_COEFF_INT * (v - V_OFFSET) + CONVERT_DELTA)
+                            >> CONVERT_FRACTION_BIT), 0, 255); // G value
+            *(rbf->buffer_alloc + (i+dst_y_offset) * rbf->stride + (j+dst_x_offset) * 3 + 2) =
+                    clamp(((YB_COEFF_INT * (y - Y_OFFSET) + UB_COEFF_INT * (u - U_OFFSET) + CONVERT_DELTA) >> CONVERT_FRACTION_BIT), 0, 255); // B value
+        }
+    }
+}
+
 int RGB24_to_YV12_c(YV12_BUFFER_CONFIG *ybf, RGB24_BUFFER_CONFIG *rbf, vpx_color_space_t color_space, vpx_color_range_t color_range) {
     if (ybf == NULL || rbf == NULL) {
         return -1;
@@ -297,6 +367,32 @@ int YV12_to_RGB24_c(RGB24_BUFFER_CONFIG *rbf, YV12_BUFFER_CONFIG *ybf, vpx_color
     diff = (finish_time.tv_sec - start_time.tv_sec) * 1000 +
            (finish_time.tv_nsec - start_time.tv_nsec) / BILLION * 1000.0;
     printf("yv12_to_rgb24: %f", diff);
+#endif
+
+    return 0;
+}
+
+int YV12_to_RGB24_patch_c(RGB24_BUFFER_CONFIG *rbf, YV12_BUFFER_CONFIG *ybf, vpx_color_space_t color_space, vpx_color_range_t color_range, int src_x_offset, int src_y_offset, int dst_x_offset, int dst_y_offset, int width, int height) {
+    if (ybf == NULL || rbf == NULL) {
+        return -1;
+    }
+
+#if DEBUG_LATENCY
+    struct timespec start_time, finish_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+    double diff;
+#endif
+    if (color_space == VPX_CS_BT_709 && color_range == VPX_CR_STUDIO_RANGE) {
+        YV12_to_RGB24_bt701_patch_c(rbf, ybf, src_x_offset, src_y_offset, dst_x_offset, dst_y_offset, width, height);
+    }
+    else {
+        return -1;
+    }
+#if DEBUG_LATENCY
+    clock_gettime(CLOCK_MONOTONIC, &finish_time);
+    diff = (finish_time.tv_sec - start_time.tv_sec) * 1000 +
+           (finish_time.tv_nsec - start_time.tv_nsec) / BILLION * 1000.0;
+    printf("yv12_to_rgb24_patch: %f", diff);
 #endif
 
     return 0;

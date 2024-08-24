@@ -396,7 +396,7 @@ int vpx_realloc_scaled_frame_buffer(YV12_BUFFER_CONFIG *ybf, int width, int crop
                                             (uv_border_h * uv_stride) + uv_border_w,
                                             vp9_byte_align);
 
-        /* NEMO: assign residual buffer */
+        /* PALANTIR: assign residual buffer */
         ybf->y_residual = (int16_t *) ybf->y_buffer;
         ybf->u_residual = (int16_t *) ybf->u_buffer;
         ybf->v_residual = (int16_t *) ybf->v_buffer;

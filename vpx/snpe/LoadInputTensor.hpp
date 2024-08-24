@@ -1,6 +1,6 @@
 //==============================================================================
 //
-//  Copyright (c) 2017-2019 Qualcomm Technologies, Inc.
+//  Copyright (c) 2017-2022 Qualcomm Technologies, Inc.
 //  All Rights Reserved.
 //  Confidential and Proprietary - Qualcomm Technologies, Inc.
 //
@@ -18,22 +18,29 @@
 #include "DlSystem/TensorMap.hpp"
 
 typedef unsigned int GLuint;
-std::unique_ptr<zdl::DlSystem::ITensor> loadInputTensor (std::unique_ptr<zdl::SNPE::SNPE>& snpe , std::vector<std::string>& fileLines);
-std::tuple<zdl::DlSystem::TensorMap, bool> loadMultipleInput (std::unique_ptr<zdl::SNPE::SNPE> & snpe , std::string& fileLine);
+std::unique_ptr<zdl::DlSystem::ITensor> loadInputTensor (std::unique_ptr<zdl::SNPE::SNPE>& snpe,
+                                                            std::vector<std::string>& fileLines,
+                                                            const zdl::DlSystem::StringList& inputTensorNames);
+
+std::tuple<zdl::DlSystem::TensorMap, bool> loadMultipleInput (std::unique_ptr<zdl::SNPE::SNPE>& snpe,
+                                                                std::vector<std::string>& fileLines,
+                                                                const zdl::DlSystem::StringList& inputTensorNames,
+                                                                std::vector<std::unique_ptr<zdl::DlSystem::ITensor>>& inputs);
 
 bool loadInputUserBufferFloat(std::unordered_map<std::string, std::vector<uint8_t>>& applicationBuffers,
                                 std::unique_ptr<zdl::SNPE::SNPE>& snpe,
                                 std::vector<std::string>& fileLines);
 
-bool loadInputUserBufferTf8(std::unordered_map<std::string, std::vector<uint8_t>>& applicationBuffers,
+bool loadInputUserBufferTfN(std::unordered_map<std::string, std::vector<uint8_t>>& applicationBuffers,
                          std::unique_ptr<zdl::SNPE::SNPE>& snpe,
                          std::vector<std::string>& fileLines,
-                         zdl::DlSystem::UserBufferMap& inputMap);
+                         zdl::DlSystem::UserBufferMap& inputMap,
+                         bool staticQuantization,
+                         int bitWidth);
 
 void loadInputUserBuffer(std::unordered_map<std::string, GLuint>& applicationBuffers,
                                 std::unique_ptr<zdl::SNPE::SNPE>& snpe,
                                 const GLuint inputglbuffer);
-
 
 std::unique_ptr<zdl::DlSystem::ITensor> loadInputTensorFromByteBuffer(std::shared_ptr<zdl::SNPE::SNPE>& snpe , unsigned char * buffer, int buffer_size);
 std::unique_ptr<zdl::DlSystem::ITensor> loadInputTensorFromFloatBuffer(std::shared_ptr<zdl::SNPE::SNPE>& snpe , float * buffer, int buffer_size);

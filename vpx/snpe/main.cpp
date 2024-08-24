@@ -23,7 +23,7 @@
 #include <algorithm>
 
 #include <vpx_mem/vpx_mem.h>
-#include <vpx/vpx_nemo.h>
+#include <vpx/vpx_palantir.h>
 #include "CheckRuntime.hpp"
 #include "LoadContainer.hpp"
 #include "SetBuilderOptions.hpp"
@@ -66,7 +66,7 @@
 #define LOGF(...) __android_log_print(_FATAL,TAG,__VA_ARGS__)
 #define LOGS(...) __android_log_print(_SILENT,TAG,__VA_ARGS__)
 
-SNPE::SNPE(nemo_dnn_runtime runtime_mode)
+SNPE::SNPE(palantir_dnn_runtime runtime_mode)
 {
     {
         switch (runtime_mode) {
@@ -100,7 +100,7 @@ SNPE::SNPE(nemo_dnn_runtime runtime_mode)
     fprintf(stdout, "SNPE: Allocate class\n");
 }
 
-void *snpe_alloc(nemo_dnn_runtime runtime_mode) {
+void *snpe_alloc(palantir_dnn_runtime runtime_mode) {
     return static_cast<void *>(new SNPE(runtime_mode));
 }
 
@@ -109,6 +109,11 @@ SNPE::~SNPE(void){
     {
         snpe.reset();
     }
+    /*
+    if (container)
+    {
+        container.reset();
+    }*/
 }
 
 void snpe_free(void *snpe) {
@@ -135,7 +140,6 @@ int snpe_check_runtime(void *snpe){
 }
 
 int SNPE::init_network(const char *path){
-    static std::string dlc;
     static zdl::DlSystem::RuntimeList runtimeList;
     bool useUserSuppliedBuffers = false;
     bool usingInitCaching = false;
@@ -145,11 +149,14 @@ int SNPE::init_network(const char *path){
 
     //check if dlc is valid file
     std::ifstream dlcFile(path);
-    if(!dlcFile){
+    if(!dlcFile) {
         LOGE("DLC does not exist");
         fprintf(stdout, "DLC does not exist\n");
         return -1;
+    } else {
+        fprintf(stdout, "[init_network] loading %s\n", path);
     }
+    dlc_path = path;
 
     //Open dlc
     std::unique_ptr<zdl::DlContainer::IDlContainer> container = loadContainerFromFile(path);
@@ -168,12 +175,55 @@ int SNPE::init_network(const char *path){
     }
 
     fprintf(stdout, "SNPE: Init network\n");
+    container->save(dlc_path);
+    return 0;
+}
+
+int SNPE::reload_network(const int width, const int height){
+    static zdl::DlSystem::RuntimeList runtimeList;
+    bool useUserSuppliedBuffers = false;
+    bool usingInitCaching = false;
+    zdl::DlSystem::UDLFactoryFunc udlFunc = UdlExample::MyUDLFactory;
+    zdl::DlSystem::UDLBundle udlBundle; udlBundle.cookie = (void*)0xdeadbeaf, udlBundle.func = udlFunc; // 0xdeadbeaf to test cookie
+    zdl::DlSystem::PlatformConfig platformConfig;
+
+    //check if dlc is valid file
+    std::ifstream dlcFile(dlc_path);
+    if (!dlcFile) {
+        LOGE("DLC does not exist");
+        fprintf(stdout, "DLC does not exist\n");
+        return -1;
+    }  else {
+        fprintf(stdout, "[reload_network] loading %s\n", dlc_path.c_str());
+    }
+
+    //Open dlc
+    std::unique_ptr<zdl::DlContainer::IDlContainer> container = loadContainerFromFile(dlc_path);
+    if (container == nullptr)
+    {
+        LOGE("Faild to open a dlc file");
+        fprintf(stdout, "Failed to open a dlc file\n");
+        return -1;
+    }
+
+    snpe = setBuilderOptions2(container, runtime, runtimeList, udlBundle, useUserSuppliedBuffers, platformConfig, usingInitCaching, width, height);
+    if(snpe == nullptr){
+        LOGE("failed to build a snpe object");
+        fprintf(stdout, "Failed build a snpe object\n");
+        return -1;
+    }
+
+    fprintf(stdout, "SNPE: Init network\n");
     return 0;
 }
 
 //TODO (snpe): config best user buffer
 int snpe_load_network(void *snpe, const char *path){
     return static_cast<SNPE *>(snpe)->init_network(path);
+}
+
+int snpe_reload_network(void *snpe, const int width, const int height){
+    return static_cast<SNPE *>(snpe)->reload_network(width, height);
 }
 
 int SNPE::execute_byte(uint8_t *input_buffer, float *output_buffer, int number_of_elements){
