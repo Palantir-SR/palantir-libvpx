@@ -124,8 +124,7 @@ int read_cache_profile_dummy_bits(palantir_cache_profile_t *cache_profile) {
         return -1;
     }
 
-    fprintf(stdout, "cache_profile->num_dummy_bits=%d", cache_profile
-    ->num_dummy_bits);
+    fprintf(stdout, "cache_profile->num_dummy_bits=%d", cache_profile->num_dummy_bits);
     if (cache_profile->num_dummy_bits > 0) {
         for (i = 0; i < cache_profile->num_dummy_bits; i++) {
             cache_profile->offset_byte = (cache_profile->offset_byte+1)%8;
@@ -139,8 +138,7 @@ int read_cache_profile_dummy_bits(palantir_cache_profile_t *cache_profile) {
     } else {
         cache_profile->offset += 32;
     }
-    fprintf(stdout, "cache_profile->num_dummy_bits=%d", cache_profile
-    ->num_dummy_bits);
+    fprintf(stdout, "cache_profile->num_dummy_bits=%d", cache_profile->num_dummy_bits);
 
     return 0;
 }
@@ -169,7 +167,7 @@ int read_cache_profile(palantir_cache_profile_t *profile, int num_patches_per_ro
             }
         }
         fprintf(stdout, "idx=%d", idx);
-        profile->block_apply_dnn[idx] = (profile->byte_value& (1 << (profile->offset % 8))) >> (profile->offset % 8);
+        profile->block_apply_dnn[idx] = (profile->byte_value & (1 << (profile->offset % 8))) >> (profile->offset % 8);
         fprintf(stdout, "idx=%d", idx);
         if (profile->block_apply_dnn[idx]!=0) {
             frame_apply_dnn = 1;

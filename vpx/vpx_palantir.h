@@ -199,6 +199,7 @@ typedef struct palantir_cfg{
     palantir_cache_profile_t *cache_profile;
     palantir_dependency_graph_t *dependency_graph;
     palantir_bilinear_coeff_t *bilinear_coeff;
+    int gop;
     int num_patches_per_row;
     int num_patches_per_column;
     int patch_width;

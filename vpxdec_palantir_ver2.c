@@ -111,7 +111,6 @@ static const arg_def_t svcdecodingarg =
         "Decode SVC stream up to given spatial layer");
 static const arg_def_t framestatsarg =
         ARG_DEF(NULL, "framestats", 1, "Output per-frame stats (.csv format)");
-/* PALANTIR: New arguments */
 static const arg_def_t datasetdirarg =
         ARG_DEF(NULL, "dataset-dir", 1, "Dataset directory");
 static const arg_def_t inputvideonamearg =
@@ -151,7 +150,8 @@ static const arg_def_t postfixarg =
         ARG_DEF(NULL, "postfix", 1, "Postfix for a directory name");
 static const arg_def_t dnnruntimearg =
         ARG_DEF(NULL, "dnn-runtime", 1, "DNN runtime");
-/* Used for block-level scheduling*/
+/* PALANTIR: New arguments */
+static const arg_def_t goparg = ARG_DEF(NULL, "gop", 1, "group of pictures");
 static const arg_def_t npatchesperrowarg =
         ARG_DEF(NULL, "npatches-per-row", 1, "number of patches per row");
 static const arg_def_t npatchespercolarg =
@@ -172,7 +172,7 @@ static const arg_def_t *all_args[] =
     &svcdecodingarg, &framestatsarg,
     &datasetdirarg, &inputvideonamearg, &referencevideonamearg,
     &outputwidtharg, &outputheightarg, &dnnscalearg, &dnnnamearg, &decodemodearg, &dnnmodearg, &cachemodearg, &cacheprofilenamearg,
-    &savergbframedarg, &savequalityarg, &savelatencyarg, &saveyuvframearg, &savemetadataarg, &savefinegrainedmetadataarg, &savesuperfinegrainedmetadataarg, &postfixarg, &dnnruntimearg, &npatchesperrowarg, &npatchespercolarg, &patchwidtharg, &patchheightarg, &save_frame_size_arg, NULL};
+    &savergbframedarg, &savequalityarg, &savelatencyarg, &saveyuvframearg, &savemetadataarg, &savefinegrainedmetadataarg, &savesuperfinegrainedmetadataarg, &postfixarg, &dnnruntimearg, &goparg, &npatchesperrowarg, &npatchespercolarg, &patchwidtharg, &patchheightarg, &save_frame_size_arg, NULL};
 #if CONFIG_VP8_DECODER
 static const arg_def_t addnoise_level =
 ARG_DEF(NULL, "noise-level", 1, "Enable VP8 postproc add noise");
@@ -984,6 +984,8 @@ static int main_loop(int argc, const char **argv_)
             postfix = arg.val;
         else if (arg_match(&arg, &dnnruntimearg, argi))
             set_runtime(&palantir_cfg->dnn_runtime, arg.val);
+        else if (arg_match(&arg, &goparg, argi))
+            palantir_cfg->gop = atoi(arg.val);
         else if (arg_match(&arg, &npatchesperrowarg, argi))
             palantir_cfg->num_patches_per_row = atoi(arg.val);
         else if (arg_match(&arg, &npatchespercolarg, argi))
@@ -1190,15 +1192,11 @@ static int main_loop(int argc, const char **argv_)
             if(vpx_load_palantir_cache_profile(&decoder, 2, cache_profile_path, palantir_cfg->num_patches_per_row, palantir_cfg->num_patches_per_column)){
                 warn("Failed to load a cache profile: %s\n", vpx_codec_error(&decoder));
                 goto fail;
-            } else {
-                fprintf(stderr, "load_palantir_cache_profile finished");
             }
         } else {
             if(vpx_load_palantir_cache_profile(&decoder, dnn_scale, cache_profile_path, palantir_cfg->num_patches_per_row, palantir_cfg->num_patches_per_column)){
                 warn("Failed to load a cache profile: %s\n", vpx_codec_error(&decoder));
                 goto fail;
-            } else {
-                fprintf(stderr, "load_palantir_cache_profile finished");
             }
         }
         

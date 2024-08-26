@@ -406,8 +406,6 @@ load_palantir_cache_profile(vpx_codec_alg_priv_t *ctx, int scale, const char *ca
 #endif
         fprintf(stderr, "%s: fail to open a file %s\n", __func__, cache_profile_path);
         return VPX_PALANTIR_ERROR;
-    } else {
-        fprintf(stderr, "%s: file %s opened\n", __func__, cache_profile_path);
     }
 
     struct stat buf;

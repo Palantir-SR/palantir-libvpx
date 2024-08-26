@@ -3589,7 +3589,7 @@ void vp9_decode_frame(VP9Decoder *pbi, const uint8_t *data,
             switch (cm->palantir_cfg->cache_mode) {
                 case PROFILE_CACHE:
                     if (cm->frame_type == KEY_FRAME) {
-                        if (cm->current_video_frame % 60 == 0) {
+                        if (cm->current_video_frame % cm->palantir_cfg->gop == 0) {
                             if (read_cache_profile_dummy_bits(cache_profile) == -1) {
                                 fprintf(stderr, "%s: fall back to NO_CACHE mode\n", __func__);
                                 cm->palantir_cfg->cache_mode = NO_CACHE;
