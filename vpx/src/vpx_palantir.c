@@ -145,8 +145,6 @@ int read_cache_profile_dummy_bits(palantir_cache_profile_t *cache_profile) {
 
 int read_cache_profile(palantir_cache_profile_t *profile, int num_patches_per_row, int num_patches_per_column, int save_finegrained_metadata, int save_super_finegrained_metadata) {
 
-    fprintf(stdout, "Executing read_cache_profile");
-
     int frame_apply_dnn = 0;
     if (profile == NULL) {
         fprintf(stderr, "%s: profile is NULL", __func__);
@@ -159,23 +157,18 @@ int read_cache_profile(palantir_cache_profile_t *profile, int num_patches_per_ro
 
     const int remaining_bits = num_patches_per_row * num_patches_per_column;
     for (int idx = 0; idx < remaining_bits; idx ++) {
-        fprintf(stdout, "idx=%d", idx);
         if (profile->offset_byte == 0){
             if (fread(&profile->byte_value, sizeof(uint8_t), 1, profile->file) != 1) {
                     fprintf(stderr, "%s: fail to read a cache profile\n", __func__);
                     return -1;
             }
         }
-        fprintf(stdout, "idx=%d", idx);
         profile->block_apply_dnn[idx] = (profile->byte_value & (1 << (profile->offset % 8))) >> (profile->offset % 8);
-        fprintf(stdout, "idx=%d", idx);
         if (profile->block_apply_dnn[idx]!=0) {
             frame_apply_dnn = 1;
         }
-        fprintf(stdout, "idx=%d", idx);
         profile->offset_byte = (profile->offset_byte+1)%8;
         profile->offset ++;
-        fprintf(stdout, "idx=%d", idx);
     }
 
     if (save_finegrained_metadata || save_super_finegrained_metadata) {

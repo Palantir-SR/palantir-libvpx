@@ -3403,11 +3403,14 @@ void upscale_frame_by_online_dnn(VP9_COMMON *const cm) {
             clock_gettime(CLOCK_MONOTONIC, &finish_time_0);
             cm->latency.sr_convert_rgb_to_yuv += (finish_time_0.tv_sec - start_time_0.tv_sec) * 1000 + (finish_time_0.tv_nsec - start_time_0.tv_nsec) / BILLION * 1000.0;
         #endif
+        fprintf(stdout, "[Frame %d_%d] anchor frame.\n", cm->current_video_frame, cm->current_super_frame);
     } else if (cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
+        int num_anchors = 0;
         for (int i = 0; i < cm->palantir_cfg->num_patches_per_row; i ++) {
             for (int j = 0; j < cm->palantir_cfg->num_patches_per_column; j ++){
                 int index = i * cm->palantir_cfg->num_patches_per_column + j;
                 if (cm->palantir_cfg->cache_profile->block_apply_dnn[index]==1) {
+                    num_anchors += 1;
                     #if DEBUG_LATENCY
                         cm->latency.sr_num_anchors += 1;
                     #endif
@@ -3446,6 +3449,7 @@ void upscale_frame_by_online_dnn(VP9_COMMON *const cm) {
                 }
             }
         }
+        fprintf(stdout, "[Frame %d_%d] %d anchor patches.\n", cm->current_video_frame, cm->current_super_frame, num_anchors);
     }
 #endif
 }
@@ -3591,22 +3595,18 @@ void vp9_decode_frame(VP9Decoder *pbi, const uint8_t *data,
                     if (cm->frame_type == KEY_FRAME) {
                         if (cm->current_video_frame % cm->palantir_cfg->gop == 0) {
                             if (read_cache_profile_dummy_bits(cache_profile) == -1) {
-                                fprintf(stderr, "%s: fall back to NO_CACHE mode\n", __func__);
+                                fprintf(stdout, "%s: fall back to NO_CACHE mode\n", __func__);
                                 cm->palantir_cfg->cache_mode = NO_CACHE;
                                 cm->frame_apply_dnn = 0;
                             }
-                            fprintf(stdout, "profile read\n");
-                            fprintf(stdout, "palantir_cfg %d %d", cm->palantir_cfg->num_patches_per_row, cm->palantir_cfg->num_patches_per_column);
-                            fprintf(stdout, "frame_apply_dnn=%d\n", cm->frame_apply_dnn);
                         }
                     }
 
                     if ((cm->frame_apply_dnn=read_cache_profile(cache_profile, cm->palantir_cfg->num_patches_per_row, cm->palantir_cfg->num_patches_per_column, cm->palantir_cfg->save_finegrained_metadata, cm->palantir_cfg->save_super_finegrained_metadata)) == -1) {
-                        fprintf(stderr, "%s: fall back to NO_CACHE mode\n", __func__);
+                        fprintf(stdout, "%s: fall back to NO_CACHE mode\n", __func__);
                         cm->palantir_cfg->cache_mode = NO_CACHE;
                         cm->frame_apply_dnn = 0;
                     }
-                    fprintf(stdout, "frame_apply_dnn=%d\n", cm->frame_apply_dnn);
                     break;
                 case KEY_FRAME_CACHE:
                     cm->frame_apply_dnn = (cm->frame_type == KEY_FRAME ? 1 : 0);
@@ -3667,6 +3667,8 @@ void vp9_decode_frame(VP9Decoder *pbi, const uint8_t *data,
             case NO_DNN:
                 break;
         }
+    } else {
+        fprintf(stdout, "[Frame %d_%d] no dnn.\n", cm->current_video_frame, cm->current_super_frame);
     }
 
     if (!xd->corrupted) {
