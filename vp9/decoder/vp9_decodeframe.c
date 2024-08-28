@@ -526,6 +526,9 @@ static void predict_and_reconstruct_intra_block(palantir_cfg_t *palantir_cfg, Ti
 
 static int is_current_block_within_some_anchor_block(VP9Decoder *const pbi, int col_offset, int row_offset, int block_width, int block_height) {
     VP9_COMMON *const cm = &pbi->common;
+    if (cm->current_video_frame < 100) {
+        return 0;
+    }
     palantir_cfg_t *const palantir_cfg = cm->palantir_cfg;
     if(row_offset+block_height > palantir_cfg->num_patches_per_column * palantir_cfg->patch_height ) {
         return 0;
@@ -3367,7 +3370,7 @@ void upscale_frame_by_online_dnn(VP9_COMMON *const cm) {
     double diff0 = 0;
     cm->latency.sr_num_anchors = 0;
 #endif
-    if (cm->palantir_cfg->decode_mode == DECODE_CACHE) {
+    if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_SR) {
         RGB24_realloc_frame_buffer(cm->rgb24_input_tensor, cm->width, cm->height);
         RGB24_realloc_frame_buffer(cm->rgb24_sr_tensor, cm->width * cm->scale, cm->height * cm->scale);
 
@@ -3602,7 +3605,7 @@ void vp9_decode_frame(VP9Decoder *pbi, const uint8_t *data,
                         }
                     }
 
-                    if ((cm->frame_apply_dnn=read_cache_profile(cache_profile, cm->palantir_cfg->num_patches_per_row, cm->palantir_cfg->num_patches_per_column, cm->palantir_cfg->save_finegrained_metadata, cm->palantir_cfg->save_super_finegrained_metadata)) == -1) {
+                    if ((cm->frame_apply_dnn=read_cache_profile(cache_profile, cm->palantir_cfg->num_patches_per_row, cm->palantir_cfg->num_patches_per_column, cm->palantir_cfg->save_finegrained_metadata,cm->palantir_cfg->save_super_finegrained_metadata)) == -1) {
                         fprintf(stdout, "%s: fall back to NO_CACHE mode\n", __func__);
                         cm->palantir_cfg->cache_mode = NO_CACHE;
                         cm->frame_apply_dnn = 0;
@@ -3621,10 +3624,10 @@ void vp9_decode_frame(VP9Decoder *pbi, const uint8_t *data,
             break;
     }
 
-    /* (deprecated) PALANTIR: fullfill buffer at the beginning of video streaming */
+    /* PALANTIR: fullfill buffer at the beginning of video streaming */
     if (cm->palantir_cfg->decode_mode == DECODE_CACHE || cm->palantir_cfg->decode_mode == DECODE_BLOCK_CACHE) {
         if (cm->current_video_frame < 100) {
-            //cm->frame_apply_dnn = 0;
+            cm->frame_apply_dnn = 0;
         }
     }
 
